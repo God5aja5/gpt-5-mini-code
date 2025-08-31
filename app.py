@@ -39,9 +39,6 @@ headers = {
     "referer": "https://workik.com/"
 }
 
-# In-memory last user prompt per session for "continue"
-session_last_prompt = {}
-
 def load_tokens_from_file():
     global _current_tokens
     if not os.path.exists(TOKENS_FILE):
@@ -75,18 +72,18 @@ def append_tokens_to_file(wk_ld, wk_ck, coding_language=None):
 
 load_tokens_from_file()
 
-def ai_payload(prompt, file_info=None, is_edit_request=False):
-    # Always instruct AI to output code inside ```Code Box``` fences
+def ai_payload(prompt, messages=None, file_info=None, is_edit_request=False):
+    # System instructions for the AI
     system_instructions = (
         "You are Gpt 5 mini. Rules:\n"
-        "1) Always place any code inside triple backticks with Code Box as the fence label, like:\n"
+        "1) Always place any code inside triple backticks with 'Code Box' as the language identifier, like:\n"
         "```Code Box\n...your code...\n```\n"
-        "2) When user asks to edit code, return only the updated code under Code Box with minimal explanation.\n"
+        "2) When a user asks to edit code, return only the updated code under a 'Code Box' with minimal explanation.\n"
         "3) When a user uploads files, analyze them by their file name and content, and use them to inform your response. Do not hallucinate file content.\n"
         "4) When the user asks for a project in a ZIP file, only respond with 'READY_FOR_ZIP' and nothing else.\n"
+        "5) You have a memory of the current conversation. Use the provided message history to understand context and follow-up questions."
     )
 
-    # Convert the list of uploaded files to the format expected by the API
     uploaded_files_list = []
     if file_info:
         for f in file_info:
@@ -97,6 +94,14 @@ def ai_payload(prompt, file_info=None, is_edit_request=False):
                 "mime": f.get("mime", "text/plain")
             })
     
+    # Ensure messages are in the correct format for the API
+    api_messages = []
+    if messages:
+        for msg in messages:
+            # The API might expect 'assistant' instead of 'bot'
+            role = "assistant" if msg.get("role") == "bot" else msg.get("role")
+            api_messages.append({"role": role, "content": msg.get("content")})
+
     payload = {
         "aiInput": prompt,
         "token_type": "workik.openai:gpt_5_mini",
@@ -125,7 +130,7 @@ def ai_payload(prompt, file_info=None, is_edit_request=False):
             "status": "own",
             "context": {}
         },
-        "all_messages": [],
+        "all_messages": api_messages, # <-- **MEMORY FIX**: Pass the conversation history
         "codingLanguage": "",
     }
     return payload
@@ -140,66 +145,28 @@ def is_edit_request(text):
     ]
     return any(trigger in t for trigger in triggers)
 
-def codebox_stream_wrapper(gen):
-    """
-    Transform any triple backtick fences to use ```Code Box for the opening fence.
-    Keeps streaming behavior while handling boundary splits.
-    """
-    buffer = ""
-    fence_open = False
-    for chunk in gen:
-        buffer += chunk
-        while True:
-            idx = buffer.find("```")
-            if idx == -1:
-                if not fence_open:
-                    yield buffer
-                    buffer = ""
-                break
-            before = buffer[:idx]
-            after = buffer[idx + 3:]
-            if not fence_open:
-                nl = after.find("\n")
-                if nl == -1:
-                    break
-                language = after[:nl]
-                rest = after[nl + 1:]
-                yield before
-                yield "```Code Box\n"
-                fence_open = True
-                buffer = rest
-            else:
-                yield before + "```"
-                fence_open = False
-                buffer = after
-    if buffer:
-        yield buffer
-
-def workik_stream(prompt, files=None, is_edit=False):
-    payload = ai_payload(prompt, file_info=files, is_edit_request=is_edit)
+def workik_stream(prompt, messages=None, files=None, is_edit=False):
+    payload = ai_payload(prompt, messages=messages, file_info=files, is_edit_request=is_edit)
     try:
         r = requests.post(API_URL, headers=headers, data=json.dumps(payload), stream=True, timeout=None)
-    except Exception as e:
-        yield f"Error: {str(e)}"
-        return
-
-    if r.status_code != 200:
-        try:
-            body = r.text
-        except:
-            body = ""
-        yield f"Error: {r.status_code}, {body}"
+        r.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        yield f"Error: Could not connect to the AI service. Details: {str(e)}"
         return
 
     for line in r.iter_lines(decode_unicode=True):
         if not line:
             continue
         try:
+            # The API often sends 'data: ' prefix
+            if line.startswith('data: '):
+                line = line[6:]
             data = json.loads(line)
             content = data.get("content")
             if content:
                 yield content
-        except Exception:
+        except (json.JSONDecodeError, AttributeError):
+            # Ignore lines that are not valid JSON or don't have the expected structure
             continue
 
 @app.route("/")
@@ -208,83 +175,69 @@ def index():
 
 @app.route("/upload_files", methods=["POST"])
 def upload_files():
-    if "files" not in request.files:
-        return jsonify({"error": "No files uploaded"}), 400
-    
-    uploaded_files = request.files.getlist("files")
-    
-    if len(uploaded_files) > 20:
-        return jsonify({"error": "Maximum 20 files can be uploaded at once."}), 400
-    
-    results = []
-    
-    for f in uploaded_files:
-        if f.filename.endswith(".zip"):
-            try:
-                with zipfile.ZipFile(f, 'r') as zip_ref:
-                    extracted_files = []
-                    for name in zip_ref.namelist():
-                        # Skip directories, metadata files, and empty files
-                        if not name.endswith('/') and '__MACOSX' not in name and zip_ref.getinfo(name).file_size > 0:
-                            content = zip_ref.read(name).decode('utf-8')
-                            mime_type, _ = mimetypes.guess_type(name)
-                            if mime_type is None:
-                                mime_type = 'text/plain'
-                            extracted_files.append({
-                                "name": name,
-                                "content": content,
-                                "mime": mime_type
-                            })
-                    results.extend(extracted_files)
-            except zipfile.BadZipFile:
-                return jsonify({"error": "Invalid or corrupted ZIP file"}), 400
-            except UnicodeDecodeError:
-                return jsonify({"error": f"One or more files in the ZIP archive are not valid text files and cannot be read."}), 400
-            except Exception as e:
-                return jsonify({"error": f"Error processing ZIP: {str(e)}"}), 500
-        else:
-            try:
-                content = f.read().decode('utf-8')
-                mime_type, _ = mimetypes.guess_type(f.filename)
-                if mime_type is None:
-                    mime_type = 'text/plain'
-                results.append({
-                    "name": f.filename,
-                    "content": content,
-                    "mime": mime_type
-                })
-            except UnicodeDecodeError:
-                return jsonify({"error": f"File '{f.filename}' is not a valid text file"}), 400
-            except Exception as e:
-                return jsonify({"error": f"Error reading file '{f.filename}': {str(e)}"}), 500
-    
-    return jsonify(results), 200
+    try:
+        if "files" not in request.files:
+            return jsonify({"error": "No files uploaded"}), 400
+        
+        uploaded_files = request.files.getlist("files")
+        
+        if len(uploaded_files) > 20:
+            return jsonify({"error": "Maximum 20 files can be uploaded at once."}), 400
+        
+        results = []
+        
+        for f in uploaded_files:
+            if f.filename.endswith(".zip"):
+                try:
+                    with zipfile.ZipFile(f, 'r') as zip_ref:
+                        extracted_files = []
+                        for name in zip_ref.namelist():
+                            if not name.endswith('/') and '__MACOSX' not in name and zip_ref.getinfo(name).file_size > 0:
+                                content = zip_ref.read(name).decode('utf-8')
+                                mime_type, _ = mimetypes.guess_type(name)
+                                extracted_files.append({
+                                    "name": name,
+                                    "content": content,
+                                    "mime": mime_type or 'text/plain'
+                                })
+                        results.extend(extracted_files)
+                except zipfile.BadZipFile:
+                    return jsonify({"error": "Invalid or corrupted ZIP file"}), 400
+                except UnicodeDecodeError:
+                    return jsonify({"error": f"Files in the ZIP must be valid text (UTF-8)."}), 400
+                except Exception as e:
+                    return jsonify({"error": f"Error processing ZIP: {str(e)}"}), 500
+            else:
+                try:
+                    content = f.read().decode('utf-8')
+                    mime_type, _ = mimetypes.guess_type(f.filename)
+                    results.append({
+                        "name": f.filename,
+                        "content": content,
+                        "mime": mime_type or 'text/plain'
+                    })
+                except UnicodeDecodeError:
+                    return jsonify({"error": f"File '{f.filename}' is not a valid text file"}), 400
+                except Exception as e:
+                    return jsonify({"error": f"Error reading file '{f.filename}': {str(e)}"}), 500
+        
+        return jsonify(results), 200
+    except Exception as e:
+        # A catch-all for any unexpected errors during file processing
+        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
+
 
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json(force=True, silent=True) or {}
-    session = data.get("session") or str(uuid.uuid4())
     text = (data.get("text") or "").strip()
-    action = data.get("action") or "chat"
+    messages = data.get("messages", []) # <-- **MEMORY FIX**: Get history from client
     file_info_list = data.get("fileInfoList", [])
     is_edit = is_edit_request(text)
 
-    # Handle continue
-    if action == "continue":
-        prev = session_last_prompt.get(session, "")
-        if prev:
-            text = prev + "\n\nContinue."
-        else:
-            text = "Continue."
-
-    if action == "chat":
-        if text:
-            session_last_prompt[session] = text
-
     def generate():
-        original_stream = workik_stream(text, files=file_info_list, is_edit=is_edit)
-        transformed_stream = codebox_stream_wrapper(original_stream)
-        for piece in transformed_stream:
+        # The stream is now sent directly to the client without the complex wrapper
+        for piece in workik_stream(text, messages=messages, files=file_info_list, is_edit=is_edit):
             yield piece
 
     return Response(stream_with_context(generate()), mimetype="text/plain; charset=utf-8")
@@ -315,52 +268,42 @@ def extract_tokens_from_response(text):
         if "request" in main_data and "post_data" in main_data["request"]:
             post_data_str = main_data["request"]["post_data"]
             post_data = json.loads(post_data_str)
-            coding_language = post_data.get("codingLanguage")
-            wk_ld = post_data.get("wk_ld")
-            wk_ck = post_data.get("wk_ck")
-            return coding_language, wk_ld, wk_ck
+            return (
+                post_data.get("codingLanguage"),
+                post_data.get("wk_ld"),
+                post_data.get("wk_ck")
+            )
     except (json.JSONDecodeError, KeyError):
         pass
     
-    coding_language_patterns = [
-        r'"codingLanguage\\":\\"([^"\\]*(?:\\.[^"\\]*)*)\\"',
-        r'"codingLanguage":"([^"]*)"',
-        r'codingLanguage["\s]*:\s*["\']([^"\']*)["\']'
-    ]
-    wk_ld_patterns = [
-        r'"wk_ld\\":\\"([^"\\]*(?:\\.[^"\\]*)*)\\"',
-        r'"wk_ld":"([^"]*)"',
-        r'wk_ld["\s]*:\s*["\']([^"\']*)["\']'
-    ]
-    wk_ck_patterns = [
-        r'"wk_ck\\":\\"([^"\\]*(?:\\.[^"\\]*)*)\\"',
-        r'"wk_ck":"([^"]*)"',
-        r'wk_ck["\s]*:\s*["\']([^"\']*)["\']'
-    ]
+    patterns = {
+        "codingLanguage": [r'"codingLanguage\\":\\"([^"\\]*(?:\\.[^"\\]*)*)\\"', r'"codingLanguage":"([^"]*)"'],
+        "wk_ld": [r'"wk_ld\\":\\"([^"\\]*(?:\\.[^"\\]*)*)\\"', r'"wk_ld":"([^"]*)"'],
+        "wk_ck": [r'"wk_ck\\":\\"([^"\\]*(?:\\.[^"\\]*)*)\\"', r'"wk_ck":"([^"]*)"']
+    }
     
-    def find_first(patterns, text_):
-        for p in patterns:
+    def find_first(key, text_):
+        for p in patterns[key]:
             m = re.search(p, text_)
-            if m:
-                return m.group(1)
+            if m: return m.group(1)
         return None
 
-    coding_language = find_first(coding_language_patterns, text)
-    wk_ld = find_first(wk_ld_patterns, text)
-    wk_ck = find_first(wk_ck_patterns, text)
-    return coding_language, wk_ld, wk_ck
+    return (
+        find_first("codingLanguage", text),
+        find_first("wk_ld", text),
+        find_first("wk_ck", text)
+    )
 
 @app.route("/refresh_tokens", methods=["GET"])
 def refresh_tokens():
     url = "https://host-2-iyfn.onrender.com/run-task2"
     try:
-        # Use timeout=None as requested for indefinite wait
-        res = requests.get(url, timeout=None)
+        res = requests.get(url, timeout=120) # Added a reasonable timeout
         res.raise_for_status()
         text = res.text.strip()
         coding_language, wk_ld, wk_ck = extract_tokens_from_response(text)
         if not wk_ld or not wk_ck:
-            return jsonify({"error": "Failed to extract tokens from API response. Check the raw response for errors."}), 500
+            return jsonify({"error": "Failed to extract tokens from API response."}), 500
         return jsonify({
             "codingLanguage": coding_language,
             "wk_ld": wk_ld,
@@ -369,7 +312,7 @@ def refresh_tokens():
     except requests.exceptions.RequestException as e:
         return jsonify({"error": f"Request to token API failed: {str(e)}"}), 500
     except Exception as e:
-        return jsonify({"error": f"An unexpected error occurred during token refresh: {str(e)}"}), 500
+        return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
 
 @app.route("/apply_tokens", methods=["POST"])
 def apply_tokens():
