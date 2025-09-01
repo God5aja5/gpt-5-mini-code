@@ -342,7 +342,21 @@ def ai_payload(prompt, messages=None, file_info=None, is_edit_request=False, is_
     }
     return payload
 
+def check_internet_connection():
+    """Checks for an active internet connection by pinging a reliable server."""
+    try:
+        requests.get("[https://www.google.com](https://www.google.com)", timeout=5)
+        return True
+    except requests.exceptions.RequestException:
+        return False
+
 def workik_stream(prompt, messages=None, files=None, is_edit=False, is_continue=False, last_code=None):
+    if not check_internet_connection():
+        logger.error("❌ No internet connection detected. Aborting AI request.")
+        yield "Error: No internet connection detected. Please check your network and try again."
+        return
+
+    logger.info("✅ Internet connection present. Attempting to connect to AI service.")
     payload = ai_payload(prompt, messages=messages, file_info=files, is_edit_request=is_edit, is_continue=is_continue, last_code=last_code)
     try:
         r = requests.post(API_URL, headers=headers, data=json.dumps(payload), stream=True, timeout=None)
@@ -558,7 +572,7 @@ def run_code():
             return jsonify({"error": "Failed to create execution environment"}), 500
         
         # Generate preview URL using your Render domain
-        base_url = "https://ng-x-sukuna-coder.onrender.com"
+        base_url = "[https://ng-x-sukuna-coder.onrender.com](https://ng-x-sukuna-coder.onrender.com)"
         preview_url = f"{base_url}/preview/{session_id}"
         
         preview_urls[session_id] = {
@@ -694,7 +708,7 @@ def preview_code(session_id, path=""):
                 <strong>Expires:</strong> <span id="timer">5:00</span>
             </div>
             
-            <a href="https://ng-x-sukuna-coder.onrender.com" class="back-btn">🏠 Back to Chat</a>
+            <a href="[https://ng-x-sukuna-coder.onrender.com](https://ng-x-sukuna-coder.onrender.com)" class="back-btn">🏠 Back to Chat</a>
             <button class="refresh-btn" onclick="location.reload()">🔄 Refresh</button>
             
             <div class="output" id="output">{output or 'No output yet... Execute commands in the terminal to see results here.'}</div>
@@ -782,7 +796,7 @@ def extract_tokens_from_response(text):
 
 @app.route("/refresh_tokens", methods=["GET"])
 def refresh_tokens():
-    url = "https://host-2-iyfn.onrender.com/run-task2"
+    url = "[https://host-2-iyfn.onrender.com/run-task2](https://host-2-iyfn.onrender.com/run-task2)"
     try:
         res = requests.get(url, timeout=120)
         res.raise_for_status()
