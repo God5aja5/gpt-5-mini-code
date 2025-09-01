@@ -8,13 +8,16 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/4.16.0/xterm.min.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/4.16.0/xterm.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/4.16.0/xterm-addon-fit.min.js"></script>
 
     <style>
         /* ================ DESIGN SYSTEM ================ */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         @import url('https://fonts.googleapis.com/css2?family=Fira+Code&display=swap');
         :root {
-            --font-main: 'Inter', sans-serif; --font-code: 'Fira Code', monospace; --bg-dark-primary: #1e1e2f; --bg-dark-secondary: #27293d; --bg-dark-tertiary: #3b3d55; --bg-light-hover: #4a4c6b; --text-primary: #e0e0e0; --text-secondary: #a0a0c0; --text-accent: #82aaff; --text-white: #ffffff; --accent-primary: #5a87ff; --accent-primary-hover: #709dff; --accent-danger: #ff5572; --accent-danger-hover: #ff7990; --accent-secondary: #3b3d55; --accent-secondary-hover: #4a4c6b; --border-color: #3b3d55; --shadow-color: rgba(0, 0, 0, 0.2); --code-bg: #161625;
+            --font-main: 'Inter', sans-serif; --font-code: 'Fira Code', monospace; --bg-dark-primary: #1e1e2f; --bg-dark-secondary: #27293d; --bg-dark-tertiary: #3b3d55; --bg-light-hover: #4a4c6b; --text-primary: #e0e0e0; --text-secondary: #a0a0c0; --text-accent: #82aaff; --text-white: #ffffff; --accent-primary: #5a87ff; --accent-primary-hover: #709dff; --accent-danger: #ff5572; --accent-danger-hover: #ff7990; --accent-secondary: #3b3d55; --accent-secondary-hover: #4a4c6b; --accent-success: #4CAF50; --accent-success-hover: #45a049; --border-color: #3b3d55; --shadow-color: rgba(0, 0, 0, 0.2); --code-bg: #161625;
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         html, body { height: 100%; font-family: var(--font-main); background-color: var(--bg-dark-primary); color: var(--text-primary); }
@@ -37,7 +40,7 @@
         .chat-list-item.active { background-color: var(--bg-dark-tertiary); }
         .delete-chat-btn { background: none; border: none; color: var(--text-secondary); font-size: 1rem; cursor: pointer; transition: color 0.2s ease; flex-shrink: 0; }
         .delete-chat-btn:hover { color: var(--accent-danger); }
-        .chat-view { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+        .chat-view { display: flex; flex-direction: column; height: 100%; overflow: hidden; position: relative; }
         .chat-header { background-color: var(--bg-dark-secondary); padding: 0.75rem 1rem; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); flex-shrink: 0; }
         .menu-btn { display: none; background: none; border: none; color: var(--text-primary); font-size: 1.5rem; cursor: pointer; }
         #chat-title { font-weight: 500; }
@@ -84,6 +87,14 @@
         .message-wrapper:hover .message-actions { opacity: 0.7; }
         .message.user .message-actions { justify-content: flex-end; }
         .message.bot .message-actions { justify-content: flex-start; }
+        .action-btn { background: var(--bg-dark-tertiary); border: 1px solid var(--border-color); color: var(--text-secondary); padding: 0.25rem 0.5rem; border-radius: 0.375rem; font-size: 0.75rem; cursor: pointer; transition: all 0.2s ease; display: flex; align-items: center; gap: 0.25rem; }
+        .action-btn:hover { background-color: var(--bg-light-hover); color: var(--text-white); }
+        .action-btn.copy { background-color: var(--accent-secondary); }
+        .action-btn.copy:hover { background-color: var(--accent-secondary-hover); }
+        .action-btn.continue { background-color: var(--accent-success); color: var(--text-white); }
+        .action-btn.continue:hover { background-color: var(--accent-success-hover); }
+        .action-btn.regenerate { background-color: var(--accent-primary); color: var(--text-white); }
+        .action-btn.regenerate:hover { background-color: var(--accent-primary-hover); }
         .download-btn { background-color: #4CAF50; color: white; border: none; padding: 10px 20px; text-align: center; text-decoration: none; display: inline-block; font-size: 16px; margin: 4px 2px; cursor: pointer; border-radius: 8px; }
         .download-btn:hover { background-color: #45a049; }
         .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 2000; display: flex; align-items: center; justify-content: center; padding: 1rem; }
@@ -97,12 +108,29 @@
         .btn { background: var(--bg-dark-tertiary); border: 1px solid var(--border-color); color: var(--text-primary); padding: 0.5rem 0.75rem; border-radius: 0.5rem; cursor: pointer; }
         .btn.primary { background: var(--accent-primary); color: white; border-color: var(--accent-primary); }
         .btn.danger { background: var(--accent-danger); color: white; border-color: var(--accent-danger); }
+        .terminal-container { position: fixed; bottom: 0; right: 2rem; width: 600px; max-width: 90%; height: 350px; background: var(--bg-dark-primary); border: 1px solid var(--border-color); border-radius: 0.5rem 0.5rem 0 0; z-index: 1000; display: none; flex-direction: column; }
+        .terminal-header { background: var(--bg-dark-tertiary); padding: 0.5rem 1rem; display: flex; justify-content: space-between; align-items: center; border-radius: 0.5rem 0.5rem 0 0; cursor: pointer; }
+        .terminal-header h4 { font-size: 1rem; margin: 0; }
+        .terminal-header .actions { display: flex; gap: 0.5rem; }
+        .terminal-header .actions button { background: none; border: none; color: var(--text-primary); cursor: pointer; font-size: 1.2rem; }
+        .terminal-body { flex-grow: 1; padding: 1rem; font-family: var(--font-code); font-size: 0.8em; overflow-y: auto; background: #000; color: #fff; }
+        #terminal-output { white-space: pre-wrap; word-break: break-all; }
+        .terminal-container.minimized { height: 40px; }
+        .terminal-container.minimized .terminal-body { display: none; }
+        .run-btn-container { margin: 0.5rem 0; text-align: right; }
+        .run-btn { padding: 0.5rem 1rem; background-color: var(--accent-primary); color: white; border: none; border-radius: 0.25rem; cursor: pointer; }
+        .preview-btn { padding: 0.5rem 1rem; background-color: var(--accent-success); color: white; border: none; border-radius: 0.25rem; cursor: pointer; margin-left: 0.5rem; }
+        .project-structure { background: var(--bg-dark-tertiary); padding: 1rem; border-radius: 0.5rem; margin: 1em 0; white-space: pre; }
+        .output-marker { color: var(--text-accent); font-weight: bold; }
+        .terminal-output-in-chat { background-color: #000; color: #fff; font-family: var(--font-code); padding: 1em; margin: 1em 0; border-radius: 0.5em; white-space: pre-wrap; overflow-x: auto; font-size: 0.9em; }
+
         @media (max-width: 768px) {
             .app-layout { grid-template-columns: 1fr; }
             .sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: 85%; max-width: 320px; transform: translateX(-100%); z-index: 1000; box-shadow: 5px 0 15px var(--shadow-color); transition: transform 0.3s ease; }
             .sidebar.open { transform: translateX(0); }
             .menu-btn { display: block; }
             .message-body { max-width: calc(100% - 3.25rem); }
+            .terminal-container { width: 95%; right: 2.5%; }
         }
     </style>
 </head>
@@ -135,6 +163,19 @@
             </div>
         </footer>
     </main>
+
+    <div class="terminal-container" id="terminal-container">
+        <div class="terminal-header" id="terminal-header">
+            <h4>Terminal & Preview <span id="terminal-timer"> (5:00)</span></h4>
+            <div class="actions">
+                <button id="minimize-btn" title="Minimize">─</button>
+                <button id="close-btn" title="Close">×</button>
+            </div>
+        </div>
+        <div class="terminal-body" id="terminal-body">
+            <div id="terminal-output"></div>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -154,14 +195,25 @@ document.addEventListener('DOMContentLoaded', () => {
     const attachBtn = document.getElementById('attach-btn');
     const fileInput = document.getElementById('file-input');
     const filePreviewContainer = document.getElementById('file-preview-container');
+    const terminalContainer = document.getElementById('terminal-container');
+    const terminalHeader = document.getElementById('terminal-header');
+    const terminalTimerEl = document.getElementById('terminal-timer');
+    const terminalBody = document.getElementById('terminal-body');
+    const terminalOutput = document.getElementById('terminal-output');
+    const minimizeBtn = document.getElementById('minimize-btn');
+    const closeBtn = document.getElementById('close-btn');
 
     let abortController = null;
     let tokenAbortController = null;
+    let lastBotResponse = '';
     let appState = {
         currentChatId: null,
         chats: {},
         isLoading: false,
         attachedFileContent: [],
+        terminalSessionId: null,
+        terminalTimeout: null,
+        terminalOutputReader: null,
     };
     
     const fileSupportedModels = ['gpt-5-mini'];
@@ -261,17 +313,30 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         const textContentDiv = document.createElement('div');
-        if (content && (role === 'user' || !isStreaming)) {
-             textContentDiv.textContent = content; // Display user text directly
-        }
+        const parsed = parseBotResponse(content || '');
 
         if (role === 'bot' && isStreaming && content === 'typing') {
             textContentDiv.innerHTML = `<div class="typing-indicator"><span></span><span></span><span></span></div>`;
         } else {
-            const parsed = parseBotResponse(content || '');
             const renderedMarkdown = marked.parse(parsed.content || '', { gfm: true, breaks: true });
             textContentDiv.innerHTML = renderedMarkdown;
 
+            if (parsed.runCmds.length > 0) {
+                const runBtn = document.createElement('button');
+                runBtn.className = 'run-btn';
+                runBtn.textContent = '▶️ Run Code';
+                runBtn.onclick = () => runCode(parsed.runCmds, parsed.previewUrl);
+                textContentDiv.appendChild(runBtn);
+            }
+
+            if (parsed.previewUrl) {
+                const previewBtn = document.createElement('button');
+                previewBtn.className = 'preview-btn';
+                previewBtn.textContent = '🌐 Preview';
+                previewBtn.onclick = () => window.open(parsed.previewUrl, '_blank');
+                textContentDiv.appendChild(previewBtn);
+            }
+            
             if (parsed.isZipReady) {
                 const downloadBtn = document.createElement('button');
                 downloadBtn.className = 'download-btn';
@@ -280,10 +345,45 @@ document.addEventListener('DOMContentLoaded', () => {
                 textContentDiv.appendChild(downloadBtn);
             }
         }
+        
         messageContent.appendChild(textContentDiv);
         messageBody.appendChild(messageContent);
         
-        // Action buttons logic can be re-added here if needed
+        // Add action buttons
+        if (!isStreaming) {
+            const actionsDiv = document.createElement('div');
+            actionsDiv.className = 'message-actions';
+            
+            if (role === 'user') {
+                const copyBtn = document.createElement('button');
+                copyBtn.className = 'action-btn copy';
+                copyBtn.innerHTML = '📋 Copy';
+                copyBtn.onclick = () => copyToClipboard(content || '', copyBtn);
+                actionsDiv.appendChild(copyBtn);
+            } else if (role === 'bot') {
+                const copyBtn = document.createElement('button');
+                copyBtn.className = 'action-btn copy';
+                copyBtn.innerHTML = '📋 Copy';
+                copyBtn.onclick = () => copyToClipboard(content || '', copyBtn);
+                actionsDiv.appendChild(copyBtn);
+                
+                const regenerateBtn = document.createElement('button');
+                regenerateBtn.className = 'action-btn regenerate';
+                regenerateBtn.innerHTML = '🔄 Regenerate';
+                regenerateBtn.onclick = () => regenerateResponse();
+                actionsDiv.appendChild(regenerateBtn);
+                
+                if (isResponseIncomplete(content || '')) {
+                    const continueBtn = document.createElement('button');
+                    continueBtn.className = 'action-btn continue';
+                    continueBtn.innerHTML = '▶️ Continue';
+                    continueBtn.onclick = () => continueResponse();
+                    actionsDiv.appendChild(continueBtn);
+                }
+            }
+            
+            messageBody.appendChild(actionsDiv);
+        }
         
         messageDiv.appendChild(avatar);
         messageDiv.appendChild(messageBody);
@@ -295,11 +395,184 @@ document.addEventListener('DOMContentLoaded', () => {
         return messageContent;
     }
 
+    function isResponseIncomplete(content) {
+        const indicators = [
+            content.length > 1000 && !content.trim().endsWith('.'),
+            content.includes('```') && (content.split('```').length % 2 === 0),
+            content.trim().endsWith('...'),
+            content.includes('Let me continue'),
+            content.includes('I\'ll continue'),
+            /\b(continuing|more|next|further)\b/i.test(content.slice(-100))
+        ];
+        return indicators.some(indicator => indicator);
+    }
+
+    function copyToClipboard(text, button) {
+        navigator.clipboard.writeText(text).then(() => {
+            const originalText = button.innerHTML;
+            button.innerHTML = '✅ Copied!';
+            setTimeout(() => {
+                button.innerHTML = originalText;
+            }, 2000);
+        }).catch(err => {
+            console.error('Failed to copy:', err);
+            button.innerHTML = '❌ Failed';
+            setTimeout(() => {
+                button.innerHTML = '📋 Copy';
+            }, 2000);
+        });
+    }
+
+    async function regenerateResponse() {
+        if (appState.isLoading) return;
+        
+        setLoadingState(true);
+        const currentChat = appState.chats[appState.currentChatId];
+        
+        if (currentChat.messages.length > 0 && currentChat.messages[currentChat.messages.length - 1].role === 'bot') {
+            currentChat.messages.pop();
+        }
+        
+        renderChatMessages();
+        
+        const botMessageBubble = addMessageToUI({ role: 'bot', content: 'typing' }, true);
+        abortController = new AbortController();
+
+        try {
+            const payload = {
+                messages: currentChat.messages
+            };
+
+            const res = await fetch("/regenerate", { 
+                method: "POST", 
+                signal: abortController.signal, 
+                headers: {"Content-Type": "application/json"}, 
+                body: JSON.stringify(payload) 
+            });
+            
+            if (!res.ok) throw new Error(`Server error: ${res.statusText} (${res.status})`);
+            
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let botResponse = "";
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                
+                const chunk = decoder.decode(value, { stream: true });
+                botResponse += chunk;
+                
+                const parsed = parseBotResponse(botResponse);
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = marked.parse(parsed.content + " ▋", { gfm: true, breaks: true });
+                botMessageBubble.querySelector('div:last-child').innerHTML = tempDiv.innerHTML;
+                renderMarkdownInElement(botMessageBubble);
+                scrollToBottom();
+            }
+            
+            const finalBotMessage = { role: 'bot', content: botResponse };
+            currentChat.messages.push(finalBotMessage);
+            lastBotResponse = botResponse;
+            
+            botMessageBubble.parentElement.parentElement.remove();
+            addMessageToUI(finalBotMessage);
+
+        } catch (error) {
+            const errorMessage = error.name === 'AbortError' ? "Request stopped." : `**Error:** ${error.message}`;
+            const errorMsgObj = { role: 'bot', content: errorMessage };
+            botMessageBubble.parentElement.parentElement.remove();
+            addMessageToUI(errorMsgObj);
+            currentChat.messages.push(errorMsgObj);
+        } finally {
+            setLoadingState(false);
+            saveStateToLocalStorage();
+        }
+    }
+
+    async function continueResponse() {
+        if (appState.isLoading) return;
+        
+        setLoadingState(true);
+        const currentChat = appState.chats[appState.currentChatId];
+        
+        const botMessageBubble = addMessageToUI({ role: 'bot', content: 'typing' }, true);
+        abortController = new AbortController();
+
+        try {
+            const payload = {
+                text: "Continue from where you left off.",
+                messages: currentChat.messages,
+                fileInfoList: [],
+                isContinue: true
+            };
+
+            const res = await fetch("/chat", { 
+                method: "POST", 
+                signal: abortController.signal, 
+                headers: {"Content-Type": "application/json"}, 
+                body: JSON.stringify(payload) 
+            });
+            
+            if (!res.ok) throw new Error(`Server error: ${res.statusText} (${res.status})`);
+            
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let botResponse = "";
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                
+                const chunk = decoder.decode(value, { stream: true });
+                botResponse += chunk;
+                
+                const parsed = parseBotResponse(botResponse);
+                const tempDiv = document.createElement('div');
+                tempDiv.innerHTML = marked.parse(parsed.content + " ▋", { gfm: true, breaks: true });
+                botMessageBubble.querySelector('div:last-child').innerHTML = tempDiv.innerHTML;
+                renderMarkdownInElement(botMessageBubble);
+                scrollToBottom();
+            }
+            
+            const finalBotMessage = { role: 'bot', content: botResponse };
+            currentChat.messages.push(finalBotMessage);
+            lastBotResponse = botResponse;
+            
+            botMessageBubble.parentElement.parentElement.remove();
+            addMessageToUI(finalBotMessage);
+
+        } catch (error) {
+            const errorMessage = error.name === 'AbortError' ? "Request stopped." : `**Error:** ${error.message}`;
+            const errorMsgObj = { role: 'bot', content: errorMessage };
+            botMessageBubble.parentElement.parentElement.remove();
+            addMessageToUI(errorMsgObj);
+            currentChat.messages.push(errorMsgObj);
+        } finally {
+            setLoadingState(false);
+            saveStateToLocalStorage();
+        }
+    }
+
     function parseBotResponse(text) {
         const isZipReady = text.trim() === 'READY_FOR_ZIP';
+        const runCmds = re.findall(/<RUN_CMD>(.*?)<\/RUN_CMD>/g, text).map(cmd => cmd.trim());
+        const previewUrl = re.search(/<PREVIEW_URL>(.*?)<\/PREVIEW_URL>/, text);
+        const projectStructure = re.search(/PROJECT_FILE_STRUCTURE\n([\s\S]*?)```/, text);
+        const outputMatches = re.findall(/-> SHELL OUTPUT: ([\s\S]*?)(?=(?:-> SHELL OUTPUT: )|```|$)/g, text);
+
+        let content = text;
+        content = content.replace(/<RUN_CMD>[\s\S]*?<\/RUN_CMD>/g, '');
+        content = content.replace(/<PREVIEW_URL>[\s\S]*?<\/PREVIEW_URL>/g, '');
+        content = content.replace(/-> SHELL OUTPUT: /g, '<div class="terminal-output-in-chat"><span class="output-marker">Live Terminal Output:</span>\n');
+        content = content.replace(/(?<=Live Terminal Output:)\n(.*?)(?=\n`)/g, '$1</div>');
+
         return {
-            content: isZipReady ? 'The project is ready for download. Click the button below.' : text,
-            isZipReady: isZipReady
+            content: isZipReady ? 'The project is ready for download. Click the button below.' : content,
+            isZipReady: isZipReady,
+            runCmds: runCmds,
+            previewUrl: previewUrl ? previewUrl.group(1).trim() : null,
+            projectStructure: projectStructure ? projectStructure.group(1).trim() : null
         };
     }
     
@@ -411,6 +684,7 @@ document.addEventListener('DOMContentLoaded', () => {
             
             const finalBotMessage = { role: 'bot', content: botResponse };
             currentChat.messages.push(finalBotMessage);
+            lastBotResponse = botResponse;
             
             botMessageBubble.parentElement.parentElement.remove();
             addMessageToUI(finalBotMessage);
@@ -468,13 +742,12 @@ document.addEventListener('DOMContentLoaded', () => {
         
         const formData = new FormData();
         files.forEach(file => {
-            // Correctly append file with the 'files' key
             formData.append('files', file, file.name);
         });
         try {
             const response = await fetch('/upload_files', { 
                 method: 'POST', 
-                body: formData // No manual Content-Type header needed for FormData
+                body: formData
             });
             if (!response.ok) {
                 const errorData = await response.json();
@@ -529,6 +802,11 @@ document.addEventListener('DOMContentLoaded', () => {
         attachBtn.addEventListener('click', () => fileInput.click());
         fileInput.addEventListener('change', handleFileSelect);
         newSessionBtn.addEventListener('click', onNewSessionClick);
+
+        // Terminal event listeners
+        minimizeBtn.addEventListener('click', () => terminalContainer.classList.toggle('minimized'));
+        closeBtn.addEventListener('click', closeTerminal);
+        terminalHeader.addEventListener('click', (e) => { if (e.target === terminalHeader || e.target.tagName === 'H4') terminalContainer.classList.toggle('minimized'); });
     }
 
     function onNewSessionClick() {
@@ -587,6 +865,120 @@ document.addEventListener('DOMContentLoaded', () => {
     function setStatus(text, className) { statusIndicator.textContent = text; statusIndicator.className = `status ${className}`; }
     function scrollToBottom() { chatMessages.scrollTop = chatMessages.scrollHeight; }
     function autoResizeTextarea() { inputTextArea.style.height = 'auto'; const newHeight = Math.min(inputTextArea.scrollHeight, 150); inputTextArea.style.height = `${newHeight}px`; }
+
+    // ====== New Terminal Functions ======
+    async function runCode(commands, previewUrl) {
+        if (appState.terminalSessionId) {
+            alert('A terminal session is already active. Please close it first.');
+            return;
+        }
+
+        const currentChat = appState.chats[appState.currentChatId];
+        const files = [];
+        currentChat.messages.forEach(msg => {
+            if (msg.role === 'bot' && msg.content) {
+                const codeBlocks = msg.content.match(/```Code Box\n([\s\S]*?)\n```/g);
+                if (codeBlocks) {
+                    codeBlocks.forEach(block => {
+                        const content = block.replace(/```Code Box\n|```/g, '').trim();
+                        files.push({ name: `temp_file_${uuidv4()}.py`, content: content });
+                    });
+                }
+            }
+        });
+        
+        if (files.length === 0) {
+            alert('No code blocks found to run.');
+            return;
+        }
+        
+        try {
+            const res = await fetch('/start_terminal', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ files: files })
+            });
+
+            if (!res.ok) throw new Error('Failed to start terminal session.');
+            
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+
+            appState.terminalSessionId = data.session_id;
+            
+            openTerminal(data.session_id, previewUrl);
+            
+            // Send commands to terminal
+            for (const cmd of commands) {
+                await fetch(`/terminal/${data.session_id}/command`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ command: cmd })
+                });
+            }
+
+        } catch (error) {
+            console.error('Run code error:', error);
+            alert(`Error: ${error.message}`);
+        }
+    }
+
+    function openTerminal(sessionId, previewUrl) {
+        terminalContainer.style.display = 'flex';
+        terminalContainer.classList.remove('minimized');
+        startTerminalTimer();
+        streamTerminalOutput(sessionId, previewUrl);
+    }
+
+    function closeTerminal() {
+        terminalContainer.style.display = 'none';
+        appState.terminalSessionId = null;
+        if (appState.terminalTimeout) clearTimeout(appState.terminalTimeout);
+        appState.terminalTimeout = null;
+        if (appState.terminalOutputReader) appState.terminalOutputReader.cancel();
+        appState.terminalOutputReader = null;
+        terminalOutput.textContent = '';
+    }
+
+    function startTerminalTimer() {
+        let seconds = 300;
+        terminalTimerEl.textContent = ` (5:00)`;
+        if (appState.terminalTimeout) clearTimeout(appState.terminalTimeout);
+        appState.terminalTimeout = setInterval(() => {
+            seconds--;
+            const minutes = Math.floor(seconds / 60);
+            const remainderSeconds = seconds % 60;
+            terminalTimerEl.textContent = ` (${minutes}:${remainderSeconds.toString().padStart(2, '0')})`;
+            if (seconds <= 0) {
+                closeTerminal();
+            }
+        }, 1000);
+    }
+    
+    async function streamTerminalOutput(sessionId, previewUrl) {
+        const res = await fetch(`/terminal/${sessionId}/output`);
+        appState.terminalOutputReader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { value, done } = await appState.terminalOutputReader.read();
+            if (done) break;
+            
+            buffer += decoder.decode(value, { stream: true });
+            
+            const outputMatch = buffer.match(/-> SHELL OUTPUT: ([\s\S]*)/);
+            if (outputMatch) {
+                const outputText = outputMatch[1];
+                terminalOutput.textContent += outputText;
+                buffer = '';
+            } else {
+                terminalOutput.textContent += buffer;
+                buffer = '';
+            }
+            terminalBody.scrollTop = terminalBody.scrollHeight;
+        }
+    }
 
     init();
 });
