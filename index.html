@@ -8,9 +8,7 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark-dimmed.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/4.16.0/xterm.min.css" />
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/4.16.0/xterm.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/4.16.0/xterm-addon-fit.min.js"></script>
+    <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
 
     <style>
         /* ================ DESIGN SYSTEM ================ */
@@ -40,7 +38,7 @@
         .chat-list-item.active { background-color: var(--bg-dark-tertiary); }
         .delete-chat-btn { background: none; border: none; color: var(--text-secondary); font-size: 1rem; cursor: pointer; transition: color 0.2s ease; flex-shrink: 0; }
         .delete-chat-btn:hover { color: var(--accent-danger); }
-        .chat-view { display: flex; flex-direction: column; height: 100%; overflow: hidden; position: relative; }
+        .chat-view { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
         .chat-header { background-color: var(--bg-dark-secondary); padding: 0.75rem 1rem; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); flex-shrink: 0; }
         .menu-btn { display: none; background: none; border: none; color: var(--text-primary); font-size: 1.5rem; cursor: pointer; }
         #chat-title { font-weight: 500; }
@@ -95,8 +93,31 @@
         .action-btn.continue:hover { background-color: var(--accent-success-hover); }
         .action-btn.regenerate { background-color: var(--accent-primary); color: var(--text-white); }
         .action-btn.regenerate:hover { background-color: var(--accent-primary-hover); }
+        .action-btn.run-code { background-color: #ff9500; color: var(--text-white); }
+        .action-btn.run-code:hover { background-color: #ff8c00; }
         .download-btn { background-color: #4CAF50; color: white; border: none; padding: 10px 20px; text-align: center; text-decoration: none; display: inline-block; font-size: 16px; margin: 4px 2px; cursor: pointer; border-radius: 8px; }
         .download-btn:hover { background-color: #45a049; }
+        
+        /* Terminal Styles */
+        .terminal-container { position: fixed; bottom: 20px; right: 20px; width: 600px; height: 400px; background: var(--bg-dark-primary); border: 1px solid var(--border-color); border-radius: 0.5rem; z-index: 1000; display: none; flex-direction: column; box-shadow: 0 10px 30px var(--shadow-color); }
+        .terminal-container.minimized { height: 40px; overflow: hidden; }
+        .terminal-header { background: var(--bg-dark-secondary); padding: 0.5rem 1rem; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); }
+        .terminal-title { font-size: 0.875rem; font-weight: 500; }
+        .terminal-controls { display: flex; gap: 0.5rem; }
+        .terminal-btn { background: none; border: none; color: var(--text-secondary); cursor: pointer; padding: 0.25rem; }
+        .terminal-btn:hover { color: var(--text-white); }
+        .terminal-output { flex-grow: 1; padding: 1rem; font-family: var(--font-code); font-size: 0.875rem; line-height: 1.4; overflow-y: auto; background: var(--bg-dark-primary); color: var(--text-primary); white-space: pre-wrap; }
+        .terminal-input-area { padding: 0.5rem 1rem; border-top: 1px solid var(--border-color); display: flex; align-items: center; gap: 0.5rem; }
+        .terminal-prompt { color: var(--text-accent); font-family: var(--font-code); }
+        .terminal-input { flex-grow: 1; background: none; border: none; color: var(--text-primary); font-family: var(--font-code); font-size: 0.875rem; }
+        .terminal-input:focus { outline: none; }
+        .preview-info { background: var(--bg-dark-tertiary); border: 1px solid var(--border-color); border-radius: 0.5rem; padding: 1rem; margin: 1rem 0; }
+        .preview-url { color: var(--text-accent); text-decoration: none; word-break: break-all; }
+        .preview-url:hover { text-decoration: underline; }
+        .terminal-command { color: var(--text-accent); }
+        .terminal-error { color: var(--accent-danger); }
+        .terminal-success { color: var(--accent-success); }
+        
         .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 2000; display: flex; align-items: center; justify-content: center; padding: 1rem; }
         .modal-content { background: var(--bg-dark-secondary); color: var(--text-primary); padding: 1.5rem; border-radius: 0.75rem; max-width: 800px; width: 90%; max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 10px 30px var(--shadow-color); }
         .modal-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); padding-bottom: 0.75rem; margin-bottom: 1rem; }
@@ -108,29 +129,13 @@
         .btn { background: var(--bg-dark-tertiary); border: 1px solid var(--border-color); color: var(--text-primary); padding: 0.5rem 0.75rem; border-radius: 0.5rem; cursor: pointer; }
         .btn.primary { background: var(--accent-primary); color: white; border-color: var(--accent-primary); }
         .btn.danger { background: var(--accent-danger); color: white; border-color: var(--accent-danger); }
-        .terminal-container { position: fixed; bottom: 0; right: 2rem; width: 600px; max-width: 90%; height: 350px; background: var(--bg-dark-primary); border: 1px solid var(--border-color); border-radius: 0.5rem 0.5rem 0 0; z-index: 1000; display: none; flex-direction: column; }
-        .terminal-header { background: var(--bg-dark-tertiary); padding: 0.5rem 1rem; display: flex; justify-content: space-between; align-items: center; border-radius: 0.5rem 0.5rem 0 0; cursor: pointer; }
-        .terminal-header h4 { font-size: 1rem; margin: 0; }
-        .terminal-header .actions { display: flex; gap: 0.5rem; }
-        .terminal-header .actions button { background: none; border: none; color: var(--text-primary); cursor: pointer; font-size: 1.2rem; }
-        .terminal-body { flex-grow: 1; padding: 1rem; font-family: var(--font-code); font-size: 0.8em; overflow-y: auto; background: #000; color: #fff; }
-        #terminal-output { white-space: pre-wrap; word-break: break-all; }
-        .terminal-container.minimized { height: 40px; }
-        .terminal-container.minimized .terminal-body { display: none; }
-        .run-btn-container { margin: 0.5rem 0; text-align: right; }
-        .run-btn { padding: 0.5rem 1rem; background-color: var(--accent-primary); color: white; border: none; border-radius: 0.25rem; cursor: pointer; }
-        .preview-btn { padding: 0.5rem 1rem; background-color: var(--accent-success); color: white; border: none; border-radius: 0.25rem; cursor: pointer; margin-left: 0.5rem; }
-        .project-structure { background: var(--bg-dark-tertiary); padding: 1rem; border-radius: 0.5rem; margin: 1em 0; white-space: pre; }
-        .output-marker { color: var(--text-accent); font-weight: bold; }
-        .terminal-output-in-chat { background-color: #000; color: #fff; font-family: var(--font-code); padding: 1em; margin: 1em 0; border-radius: 0.5em; white-space: pre-wrap; overflow-x: auto; font-size: 0.9em; }
-
         @media (max-width: 768px) {
             .app-layout { grid-template-columns: 1fr; }
             .sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: 85%; max-width: 320px; transform: translateX(-100%); z-index: 1000; box-shadow: 5px 0 15px var(--shadow-color); transition: transform 0.3s ease; }
             .sidebar.open { transform: translateX(0); }
             .menu-btn { display: block; }
             .message-body { max-width: calc(100% - 3.25rem); }
-            .terminal-container { width: 95%; right: 2.5%; }
+            .terminal-container { width: 90%; right: 5%; }
         }
     </style>
 </head>
@@ -163,18 +168,21 @@
             </div>
         </footer>
     </main>
+</div>
 
-    <div class="terminal-container" id="terminal-container">
-        <div class="terminal-header" id="terminal-header">
-            <h4>Terminal & Preview <span id="terminal-timer"> (5:00)</span></h4>
-            <div class="actions">
-                <button id="minimize-btn" title="Minimize">─</button>
-                <button id="close-btn" title="Close">×</button>
-            </div>
+<!-- Terminal Container -->
+<div class="terminal-container" id="terminal-container">
+    <div class="terminal-header">
+        <span class="terminal-title">Code Terminal</span>
+        <div class="terminal-controls">
+            <button class="terminal-btn" id="minimize-terminal" title="Minimize">−</button>
+            <button class="terminal-btn" id="close-terminal" title="Close">×</button>
         </div>
-        <div class="terminal-body" id="terminal-body">
-            <div id="terminal-output"></div>
-        </div>
+    </div>
+    <div class="terminal-output" id="terminal-output"></div>
+    <div class="terminal-input-area">
+        <span class="terminal-prompt">$</span>
+        <input type="text" class="terminal-input" id="terminal-input" placeholder="Type command..." />
     </div>
 </div>
 
@@ -195,28 +203,45 @@ document.addEventListener('DOMContentLoaded', () => {
     const attachBtn = document.getElementById('attach-btn');
     const fileInput = document.getElementById('file-input');
     const filePreviewContainer = document.getElementById('file-preview-container');
+    
+    // Terminal elements
     const terminalContainer = document.getElementById('terminal-container');
-    const terminalHeader = document.getElementById('terminal-header');
-    const terminalTimerEl = document.getElementById('terminal-timer');
-    const terminalBody = document.getElementById('terminal-body');
     const terminalOutput = document.getElementById('terminal-output');
-    const minimizeBtn = document.getElementById('minimize-btn');
-    const closeBtn = document.getElementById('close-btn');
+    const terminalInput = document.getElementById('terminal-input');
+    const minimizeTerminal = document.getElementById('minimize-terminal');
+    const closeTerminal = document.getElementById('close-terminal');
 
     let abortController = null;
     let tokenAbortController = null;
     let lastBotResponse = '';
+    let currentTerminalSession = null;
+    let socket = null;
+    
     let appState = {
         currentChatId: null,
         chats: {},
         isLoading: false,
         attachedFileContent: [],
-        terminalSessionId: null,
-        terminalTimeout: null,
-        terminalOutputReader: null,
     };
     
     const fileSupportedModels = ['gpt-5-mini'];
+
+    // Initialize Socket.IO
+    function initSocket() {
+        socket = io();
+        
+        socket.on('connect', () => {
+            console.log('Connected to terminal server');
+        });
+        
+        socket.on('terminal_output', (data) => {
+            appendToTerminal(data.output, data.type);
+        });
+        
+        socket.on('terminal_status', (data) => {
+            console.log('Terminal status:', data);
+        });
+    }
 
     function init() {
         loadStateFromLocalStorage();
@@ -229,6 +254,7 @@ document.addEventListener('DOMContentLoaded', () => {
         setupEventListeners();
         autoResizeTextarea();
         inputTextArea.focus();
+        initSocket();
     }
 
     function loadStateFromLocalStorage() {
@@ -306,37 +332,33 @@ document.addEventListener('DOMContentLoaded', () => {
             files.forEach(file => {
                 const fileEl = document.createElement('div');
                 fileEl.className = 'file-preview';
-                fileEl.innerHTML = `<span class="file-preview-icon">📄</span><span class="file-preview-name">${file.name}</span>`;
+                
+                if (file.is_zip) {
+                    fileEl.innerHTML = `<span class="file-preview-icon">📦</span><span class="file-preview-name">Extracted ZIP: ${file.content}</span>`;
+                    // Show unzipping message in terminal if terminal is open
+                    if (currentTerminalSession) {
+                        addToChat(`→ Unzipping and analyzing files...`, 'system');
+                    }
+                } else {
+                    fileEl.innerHTML = `<span class="file-preview-icon">📄</span><span class="file-preview-name">${file.name}</span>`;
+                }
                 filesContainer.appendChild(fileEl);
             });
             messageContent.appendChild(filesContainer);
         }
         
         const textContentDiv = document.createElement('div');
-        const parsed = parseBotResponse(content || '');
+        if (content && (role === 'user' || !isStreaming)) {
+            textContentDiv.textContent = content;
+        }
 
         if (role === 'bot' && isStreaming && content === 'typing') {
             textContentDiv.innerHTML = `<div class="typing-indicator"><span></span><span></span><span></span></div>`;
         } else {
+            const parsed = parseBotResponse(content || '');
             const renderedMarkdown = marked.parse(parsed.content || '', { gfm: true, breaks: true });
             textContentDiv.innerHTML = renderedMarkdown;
 
-            if (parsed.runCmds.length > 0) {
-                const runBtn = document.createElement('button');
-                runBtn.className = 'run-btn';
-                runBtn.textContent = '▶️ Run Code';
-                runBtn.onclick = () => runCode(parsed.runCmds, parsed.previewUrl);
-                textContentDiv.appendChild(runBtn);
-            }
-
-            if (parsed.previewUrl) {
-                const previewBtn = document.createElement('button');
-                previewBtn.className = 'preview-btn';
-                previewBtn.textContent = '🌐 Preview';
-                previewBtn.onclick = () => window.open(parsed.previewUrl, '_blank');
-                textContentDiv.appendChild(previewBtn);
-            }
-            
             if (parsed.isZipReady) {
                 const downloadBtn = document.createElement('button');
                 downloadBtn.className = 'download-btn';
@@ -344,8 +366,21 @@ document.addEventListener('DOMContentLoaded', () => {
                 downloadBtn.onclick = () => createAndDownloadZip();
                 textContentDiv.appendChild(downloadBtn);
             }
+            
+            if (parsed.showRunButton && !isStreaming) {
+                const runInfo = document.createElement('div');
+                runInfo.className = 'preview-info';
+                runInfo.innerHTML = `
+                    <div style="margin-bottom: 0.5rem;">
+                        <strong>✨ Code detected! You can run this code in a live environment.</strong>
+                    </div>
+                    <button class="action-btn run-code" onclick="runCode('${content.replace(/'/g, "\\'")}')">
+                        ▶️ Run Code
+                    </button>
+                `;
+                textContentDiv.appendChild(runInfo);
+            }
         }
-        
         messageContent.appendChild(textContentDiv);
         messageBody.appendChild(messageContent);
         
@@ -355,24 +390,28 @@ document.addEventListener('DOMContentLoaded', () => {
             actionsDiv.className = 'message-actions';
             
             if (role === 'user') {
+                // Copy button for user messages
                 const copyBtn = document.createElement('button');
                 copyBtn.className = 'action-btn copy';
                 copyBtn.innerHTML = '📋 Copy';
                 copyBtn.onclick = () => copyToClipboard(content || '', copyBtn);
                 actionsDiv.appendChild(copyBtn);
             } else if (role === 'bot') {
+                // Copy button for bot messages
                 const copyBtn = document.createElement('button');
                 copyBtn.className = 'action-btn copy';
                 copyBtn.innerHTML = '📋 Copy';
                 copyBtn.onclick = () => copyToClipboard(content || '', copyBtn);
                 actionsDiv.appendChild(copyBtn);
                 
+                // Regenerate button
                 const regenerateBtn = document.createElement('button');
                 regenerateBtn.className = 'action-btn regenerate';
                 regenerateBtn.innerHTML = '🔄 Regenerate';
                 regenerateBtn.onclick = () => regenerateResponse();
                 actionsDiv.appendChild(regenerateBtn);
                 
+                // Continue button (show if response seems incomplete)
                 if (isResponseIncomplete(content || '')) {
                     const continueBtn = document.createElement('button');
                     continueBtn.className = 'action-btn continue';
@@ -396,13 +435,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function isResponseIncomplete(content) {
+        // Check if response seems incomplete
         const indicators = [
             content.length > 1000 && !content.trim().endsWith('.'),
-            content.includes('```') && (content.split('```').length % 2 === 0),
+            content.includes('```') && (content.split('```').length % 2 === 0), // Unmatched code blocks
             content.trim().endsWith('...'),
             content.includes('Let me continue'),
             content.includes('I\'ll continue'),
-            /\b(continuing|more|next|further)\b/i.test(content.slice(-100))
+            /\b(continuing|more|next|further)\b/i.test(content.slice(-100)) // Last 100 chars
         ];
         return indicators.some(indicator => indicator);
     }
@@ -429,6 +469,7 @@ document.addEventListener('DOMContentLoaded', () => {
         setLoadingState(true);
         const currentChat = appState.chats[appState.currentChatId];
         
+        // Remove the last bot message
         if (currentChat.messages.length > 0 && currentChat.messages[currentChat.messages.length - 1].role === 'bot') {
             currentChat.messages.pop();
         }
@@ -556,26 +597,198 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function parseBotResponse(text) {
         const isZipReady = text.trim() === 'READY_FOR_ZIP';
-        const runCmds = re.findall(/<RUN_CMD>(.*?)<\/RUN_CMD>/g, text).map(cmd => cmd.trim());
-        const previewUrl = re.search(/<PREVIEW_URL>(.*?)<\/PREVIEW_URL>/, text);
-        const projectStructure = re.search(/PROJECT_FILE_STRUCTURE\n([\s\S]*?)```/, text);
-        const outputMatches = re.findall(/-> SHELL OUTPUT: ([\s\S]*?)(?=(?:-> SHELL OUTPUT: )|```|$)/g, text);
-
-        let content = text;
-        content = content.replace(/<RUN_CMD>[\s\S]*?<\/RUN_CMD>/g, '');
-        content = content.replace(/<PREVIEW_URL>[\s\S]*?<\/PREVIEW_URL>/g, '');
-        content = content.replace(/-> SHELL OUTPUT: /g, '<div class="terminal-output-in-chat"><span class="output-marker">Live Terminal Output:</span>\n');
-        content = content.replace(/(?<=Live Terminal Output:)\n(.*?)(?=\n`)/g, '$1</div>');
-
+        const showRunButton = text.includes('__SHOW_RUN_BUTTON__');
+        
+        // Remove the run button marker from display
+        const cleanedText = text.replace('__SHOW_RUN_BUTTON__', '');
+        
         return {
-            content: isZipReady ? 'The project is ready for download. Click the button below.' : content,
+            content: isZipReady ? 'The project is ready for download. Click the button below.' : cleanedText,
             isZipReady: isZipReady,
-            runCmds: runCmds,
-            previewUrl: previewUrl ? previewUrl.group(1).trim() : null,
-            projectStructure: projectStructure ? projectStructure.group(1).trim() : null
+            showRunButton: showRunButton
         };
     }
     
+    // Terminal functions
+    function showTerminal() {
+        terminalContainer.style.display = 'flex';
+        terminalContainer.classList.remove('minimized');
+    }
+
+    function hideTerminal() {
+        terminalContainer.style.display = 'none';
+        if (currentTerminalSession) {
+            socket.emit('leave_terminal', { session_id: currentTerminalSession });
+            currentTerminalSession = null;
+        }
+    }
+
+    function minimizeTerminalWindow() {
+        terminalContainer.classList.toggle('minimized');
+    }
+
+    function appendToTerminal(text, type = 'stdout') {
+        const span = document.createElement('span');
+        span.className = `terminal-${type}`;
+        span.textContent = text;
+        terminalOutput.appendChild(span);
+        terminalOutput.scrollTop = terminalOutput.scrollHeight;
+    }
+
+    function addToChat(message, type = 'system') {
+        // Add system messages to chat
+        const systemMessage = {
+            role: 'system',
+            content: message,
+            type: type
+        };
+        
+        // Create a simple system message display
+        const wrapper = document.createElement('div');
+        wrapper.className = 'message-wrapper system';
+        wrapper.innerHTML = `
+            <div class="message system">
+                <div class="avatar">⚙️</div>
+                <div class="message-body">
+                    <div class="message-content" style="background: var(--bg-dark-tertiary); color: var(--text-secondary); font-style: italic;">
+                        ${message}
+                    </div>
+                </div>
+            </div>
+        `;
+        chatMessages.appendChild(wrapper);
+        scrollToBottom();
+    }
+
+    async function runCode(codeContent) {
+        try {
+            setStatus('Starting execution environment...', 'typing');
+            
+            // Extract code blocks from the content
+            const codeBlocks = codeContent.match(/```Code Box\n([\s\S]*?)\n```/g);
+            let files = [];
+            
+            if (codeBlocks) {
+                codeBlocks.forEach((block, index) => {
+                    const content = block.replace(/```Code Box\n|```/g, '').trim();
+                    const extension = detectFileExtension(content);
+                    const filename = `file${index + 1}.${extension}`;
+                    files.push({ name: filename, content: content });
+                });
+            }
+            
+            const response = await fetch('/run_code', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    code: codeContent,
+                    files: files,
+                    session_id: Date.now().toString()
+                })
+            });
+            
+            if (!response.ok) {
+                throw new Error(`Failed to start execution: ${response.statusText}`);
+            }
+            
+            const data = await response.json();
+            currentTerminalSession = data.session_id;
+            
+            showTerminal();
+            
+            // Join the terminal session
+            socket.emit('join_terminal', { session_id: currentTerminalSession });
+            
+            appendToTerminal(`🚀 Code execution environment started!\n`, 'success');
+            appendToTerminal(`📋 Session ID: ${currentTerminalSession}\n`, 'stdout');
+            appendToTerminal(`🌐 Preview URL: ${data.preview_url}\n`, 'success');
+            appendToTerminal(`⏰ Session expires in 5 minutes\n\n`, 'stdout');
+            
+            // Add preview info to chat
+            addToChat(`🚀 Code execution started! Preview: ${data.preview_url}`);
+            
+            // Auto-setup files and run
+            if (files.length > 0) {
+                setTimeout(() => {
+                    files.forEach(file => {
+                        const command = `echo '${file.content.replace(/'/g, "\\'")}' > ${file.name}`;
+                        executeTerminalCommand(command);
+                    });
+                    
+                    // Auto-run based on file type
+                    setTimeout(() => {
+                        autoRunCode(files);
+                    }, 2000);
+                }, 1000);
+            }
+            
+            setStatus('Online', 'online');
+            
+        } catch (error) {
+            console.error('Run code error:', error);
+            setStatus('Error', 'error');
+            addToChat(`❌ Error starting execution: ${error.message}`);
+        }
+    }
+
+    function detectFileExtension(content) {
+        const lowercaseContent = content.toLowerCase();
+        
+        if (lowercaseContent.includes('<!doctype html') || lowercaseContent.includes('<html')) {
+            return 'html';
+        } else if (lowercaseContent.includes('def ') || lowercaseContent.includes('import ')) {
+            return 'py';
+        } else if (lowercaseContent.includes('function ') || lowercaseContent.includes('const ') || lowercaseContent.includes('let ')) {
+            return 'js';
+        } else if (lowercaseContent.includes('package ') && lowercaseContent.includes('public class')) {
+            return 'java';
+        } else if (lowercaseContent.includes('#include') || lowercaseContent.includes('int main')) {
+            return 'cpp';
+        }
+        
+        return 'txt';
+    }
+
+    function autoRunCode(files) {
+        const htmlFiles = files.filter(f => f.name.endsWith('.html'));
+        const pythonFiles = files.filter(f => f.name.endsWith('.py'));
+        const jsFiles = files.filter(f => f.name.endsWith('.js'));
+        
+        if (htmlFiles.length > 0) {
+            // For HTML files, try to start a simple HTTP server
+            executeTerminalCommand('python3 -m http.server 8000');
+            addToChat('🌐 Starting web server on port 8000...');
+        } else if (pythonFiles.length > 0) {
+            // Run Python files
+            pythonFiles.forEach(file => {
+                executeTerminalCommand(`python3 ${file.name}`);
+            });
+        } else if (jsFiles.length > 0) {
+            // Run Node.js files
+            executeTerminalCommand('npm install'); // Install dependencies if package.json exists
+            setTimeout(() => {
+                jsFiles.forEach(file => {
+                    executeTerminalCommand(`node ${file.name}`);
+                });
+            }, 3000);
+        }
+    }
+
+    function executeTerminalCommand(command) {
+        if (currentTerminalSession && socket) {
+            socket.emit('terminal_command', {
+                session_id: currentTerminalSession,
+                command: command
+            });
+            
+            // Show command in terminal
+            appendToTerminal(`$ ${command}\n`, 'command');
+            
+            // Also show in chat with arrow
+            addToChat(`→ ${command}`);
+        }
+    }
+
     async function createAndDownloadZip() {
         const currentChat = appState.chats[appState.currentChatId];
         if (!currentChat) return;
@@ -758,6 +971,13 @@ document.addEventListener('DOMContentLoaded', () => {
             appState.attachedFileContent = data;
             displayFilePreviews(data);
             setStatus('Online', 'online');
+            
+            // If ZIP was uploaded, show unzipping message
+            const hasZip = data.some(file => file.is_zip);
+            if (hasZip) {
+                addToChat('📦 ZIP file uploaded and extracted! Contents available for analysis.');
+            }
+            
         } catch (error) {
             console.error('Upload error:', error);
             alert(`Error uploading file(s): ${error.message}`);
@@ -772,6 +992,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function displayFilePreviews(files) {
         filePreviewContainer.innerHTML = '';
         files.forEach((file, index) => {
+            if (file.name === "__ZIP_INFO__") return; // Skip zip info entries
+            
             const preview = document.createElement('div');
             preview.className = 'file-preview';
             preview.dataset.index = index;
@@ -802,11 +1024,20 @@ document.addEventListener('DOMContentLoaded', () => {
         attachBtn.addEventListener('click', () => fileInput.click());
         fileInput.addEventListener('change', handleFileSelect);
         newSessionBtn.addEventListener('click', onNewSessionClick);
-
+        
         // Terminal event listeners
-        minimizeBtn.addEventListener('click', () => terminalContainer.classList.toggle('minimized'));
-        closeBtn.addEventListener('click', closeTerminal);
-        terminalHeader.addEventListener('click', (e) => { if (e.target === terminalHeader || e.target.tagName === 'H4') terminalContainer.classList.toggle('minimized'); });
+        minimizeTerminal.addEventListener('click', minimizeTerminalWindow);
+        closeTerminal.addEventListener('click', hideTerminal);
+        
+        terminalInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                const command = terminalInput.value.trim();
+                if (command) {
+                    executeTerminalCommand(command);
+                    terminalInput.value = '';
+                }
+            }
+        });
     }
 
     function onNewSessionClick() {
@@ -866,119 +1097,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function scrollToBottom() { chatMessages.scrollTop = chatMessages.scrollHeight; }
     function autoResizeTextarea() { inputTextArea.style.height = 'auto'; const newHeight = Math.min(inputTextArea.scrollHeight, 150); inputTextArea.style.height = `${newHeight}px`; }
 
-    // ====== New Terminal Functions ======
-    async function runCode(commands, previewUrl) {
-        if (appState.terminalSessionId) {
-            alert('A terminal session is already active. Please close it first.');
-            return;
-        }
-
-        const currentChat = appState.chats[appState.currentChatId];
-        const files = [];
-        currentChat.messages.forEach(msg => {
-            if (msg.role === 'bot' && msg.content) {
-                const codeBlocks = msg.content.match(/```Code Box\n([\s\S]*?)\n```/g);
-                if (codeBlocks) {
-                    codeBlocks.forEach(block => {
-                        const content = block.replace(/```Code Box\n|```/g, '').trim();
-                        files.push({ name: `temp_file_${Date.now()}.py`, content: content });
-                    });
-                }
-            }
-        });
-        
-        if (files.length === 0) {
-            alert('No code blocks found to run.');
-            return;
-        }
-        
-        try {
-            const res = await fetch('/start_terminal', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ files: files })
-            });
-
-            if (!res.ok) throw new Error('Failed to start terminal session.');
-            
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
-
-            appState.terminalSessionId = data.session_id;
-            
-            openTerminal(data.session_id, previewUrl);
-            
-            // Send commands to terminal
-            for (const cmd of commands) {
-                await fetch(`/terminal/${data.session_id}/command`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ command: cmd })
-                });
-            }
-
-        } catch (error) {
-            console.error('Run code error:', error);
-            alert(`Error: ${error.message}`);
-        }
-    }
-
-    function openTerminal(sessionId, previewUrl) {
-        terminalContainer.style.display = 'flex';
-        terminalContainer.classList.remove('minimized');
-        startTerminalTimer();
-        streamTerminalOutput(sessionId, previewUrl);
-    }
-
-    function closeTerminal() {
-        terminalContainer.style.display = 'none';
-        appState.terminalSessionId = null;
-        if (appState.terminalTimeout) clearTimeout(appState.terminalTimeout);
-        appState.terminalTimeout = null;
-        if (appState.terminalOutputReader) appState.terminalOutputReader.cancel();
-        appState.terminalOutputReader = null;
-        terminalOutput.textContent = '';
-    }
-
-    function startTerminalTimer() {
-        let seconds = 300;
-        terminalTimerEl.textContent = ` (5:00)`;
-        if (appState.terminalTimeout) clearTimeout(appState.terminalTimeout);
-        appState.terminalTimeout = setInterval(() => {
-            seconds--;
-            const minutes = Math.floor(seconds / 60);
-            const remainderSeconds = seconds % 60;
-            terminalTimerEl.textContent = ` (${minutes}:${remainderSeconds.toString().padStart(2, '0')})`;
-            if (seconds <= 0) {
-                closeTerminal();
-            }
-        }, 1000);
-    }
-    
-    async function streamTerminalOutput(sessionId, previewUrl) {
-        const res = await fetch(`/terminal/${sessionId}/output`);
-        appState.terminalOutputReader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-
-        while (true) {
-            const { value, done } = await appState.terminalOutputReader.read();
-            if (done) break;
-            
-            buffer += decoder.decode(value, { stream: true });
-            
-            const outputMatch = buffer.match(/-> SHELL OUTPUT: ([\s\S]*)/);
-            if (outputMatch) {
-                const outputText = outputMatch[1];
-                terminalOutput.textContent += outputText;
-                buffer = '';
-            } else {
-                terminalOutput.textContent += buffer;
-                buffer = '';
-            }
-            terminalBody.scrollTop = terminalBody.scrollHeight;
-        }
-    }
+    // Make runCode globally available
+    window.runCode = runCode;
 
     init();
 });
