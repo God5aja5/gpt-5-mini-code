@@ -1,25 +1,33 @@
-# Use an official Python runtime as a parent image
-FROM python:3.9-slim-buster
+FROM python:3.9-slim
 
-# Set the working directory in the container
-WORKDIR /app
-
-# Install system dependencies for a shell environment
+# Install system dependencies including Docker
 RUN apt-get update && apt-get install -y \
-    bash \
+    curl \
+    wget \
+    unzip \
     git \
     nodejs \
     npm \
-    --no-install-recommends && rm -rf /var/lib/apt/lists/*
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy the local directory contents into the container
-COPY . /app
+# Install Docker
+RUN curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh
 
-# Install any needed Python packages specified in requirements.txt
+# Set work directory
+WORKDIR /app
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Make port 5000 available to the world outside this container
+# Copy application code
+COPY . .
+
+# Expose port
 EXPOSE 5000
 
-# Run the app.py when the container launches
+# Run the application
 CMD ["python", "app.py"]
