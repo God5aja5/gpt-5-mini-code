@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 API_URL = "https://wfhbqniijcsamdp2v3i6nts4ke0ebkyj.lambda-url.us-east-1.on.aws/api_ai_playground/ai/playground/ai/trigger"
 WORKIK_TOKEN = os.getenv("WORKIK_TOKEN", "undefined")
 
-# Default tokens
+# Default tokens (will be overridden by tokens.txt if present)
 DEFAULT_WK_LD = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoibG9jYWwiLCJzZXNzaW9uX2lkIjoiMTc1NjM4ODE4MyIsInJlcXVlc3RfY291bnQiOjAsImV4cCI6MTc1Njk5Mjk4M30.JbAEBmTbWtyysFGDftxRJvqy1LvJfIR1W-HVv_Ss-7U"
 DEFAULT_WK_CK = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoiY29va2llIiwic2Vzc2lvbl9pZCI6IjE3NTYzODgxODMiLCJyZXF1ZXN0X2NvdW50IjowLCJleHAiOjE3NTY5OTI5ODN9.Fua9aRmHJLPte8cF807w4jHA6Ff1GPwGAaOWcY9P7Us"
 
@@ -198,7 +198,7 @@ def extract_last_code_block(messages):
         if msg.get("role") == "bot" and msg.get("content"):
             code_blocks = re.findall(r'```Code Box\n([\s\S]*?)\n```', msg["content"])
             if code_blocks:
-                return code_blocks[-1]
+                return code_blocks[-1]  # Return the last code block
     return None
 
 def is_code_edit_request(text, has_previous_code=False):
@@ -208,6 +208,7 @@ def is_code_edit_request(text, has_previous_code=False):
     
     t = text.strip().lower()
     
+    # Strong edit indicators
     strong_edit_triggers = [
         "edit the code", "modify the code", "update the code", "change the code",
         "add to the code", "edit this", "modify this", "update this",
@@ -215,15 +216,18 @@ def is_code_edit_request(text, has_previous_code=False):
         "fix the code", "refactor the code", "optimize the code"
     ]
     
+    # Weaker indicators that need previous code context
     weak_edit_triggers = [
         "add", "include", "also add", "now add", "please add",
         "integrate", "implement", "enhance", "extend"
     ]
     
+    # Check strong indicators first
     for trigger in strong_edit_triggers:
         if trigger in t:
             return True
     
+    # Check weak indicators only if there's previous code
     if has_previous_code:
         for trigger in weak_edit_triggers:
             if trigger in t and any(word in t for word in ["function", "feature", "method", "class", "variable", "property", "support", "functionality"]):
@@ -257,6 +261,7 @@ def should_show_run_button(content):
     return has_code_block or has_programming_content
 
 def ai_payload(prompt, messages=None, file_info=None, is_edit_request=False, is_continue=False, last_code=None):
+    # Enhanced system instructions with terminal capabilities
     system_instructions = (
         "You are Gpt 5 mini with terminal access. Rules:\n"
         "1) Always place any code inside triple backticks with 'Code Box' as the language identifier, like:\n"
@@ -277,10 +282,12 @@ def ai_payload(prompt, messages=None, file_info=None, is_edit_request=False, is_
         "14) For Node.js apps, include package.json and proper dependencies."
     )
 
+    # If it's an edit request and we have previous code, include it in the context
     if is_edit_request and last_code:
         enhanced_prompt = f"Here's the existing code:\n\n```Code Box\n{last_code}\n```\n\nUser request: {prompt}\n\nPlease edit the above code according to the user's request and return the complete updated code."
         prompt = enhanced_prompt
 
+    # If it's a continue request, add continue instruction
     if is_continue:
         prompt = f"Continue from where you left off: {prompt}"
 
@@ -294,9 +301,11 @@ def ai_payload(prompt, messages=None, file_info=None, is_edit_request=False, is_
                 "mime": f.get("mime", "text/plain")
             })
     
+    # Ensure messages are in the correct format for the API
     api_messages = []
     if messages:
         for msg in messages:
+            # The API might expect 'assistant' instead of 'bot'
             role = "assistant" if msg.get("role") == "bot" else msg.get("role")
             api_messages.append({"role": role, "content": msg.get("content")})
 
@@ -335,25 +344,104 @@ def ai_payload(prompt, messages=None, file_info=None, is_edit_request=False, is_
 
 def workik_stream(prompt, messages=None, files=None, is_edit=False, is_continue=False, last_code=None):
     payload = ai_payload(prompt, messages=messages, file_info=files, is_edit_request=is_edit, is_continue=is_continue, last_code=last_code)
+    
+    # Create a session with better timeout and retry configuration
+    session = requests.Session()
+    session.headers.update(headers)
+    
+    # Add retries and timeout configuration
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    
+    retry_strategy = Retry(
+        total=3,
+        status_forcelist=[429, 500, 502, 503, 504],
+        method_whitelist=["HEAD", "GET", "POST"],
+        backoff_factor=1
+    )
+    
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
     try:
-        r = requests.post(API_URL, headers=headers, data=json.dumps(payload), stream=True, timeout=None)
+        logger.info(f"Connecting to AI service: {API_URL}")
+        
+        # Use session with proper timeouts
+        r = session.post(
+            API_URL, 
+            data=json.dumps(payload), 
+            stream=True, 
+            timeout=(10, 60),  # (connect_timeout, read_timeout)
+            verify=True  # Keep SSL verification enabled
+        )
         r.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        yield f"Error: Could not connect to the AI service. Details: {str(e)}"
+        
+        logger.info("Successfully connected to AI service")
+        
+        # Process the streaming response
+        for line in r.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            try:
+                # The API often sends 'data: ' prefix
+                if line.startswith('data: '):
+                    line = line[6:]
+                data = json.loads(line)
+                content = data.get("content")
+                if content:
+                    yield content
+            except (json.JSONDecodeError, AttributeError):
+                # Ignore lines that are not valid JSON or don't have the expected structure
+                continue
+                
+    except requests.exceptions.Timeout:
+        logger.error("AI service request timed out")
+        yield "**Error:** AI service request timed out. Please try again or refresh tokens using the 🔐 New Session button."
         return
-
-    for line in r.iter_lines(decode_unicode=True):
-        if not line:
-            continue
-        try:
-            if line.startswith('data: '):
-                line = line[6:]
-            data = json.loads(line)
-            content = data.get("content")
-            if content:
-                yield content
-        except (json.JSONDecodeError, AttributeError):
-            continue
+        
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"AI service connection error: {str(e)}")
+        yield f"**Error:** Could not connect to AI service. This might be due to:\n\n" \
+              f"1. **Network connectivity issues**\n" \
+              f"2. **Service temporarily unavailable**\n" \
+              f"3. **Token expiration**\n\n" \
+              f"**Solutions:**\n" \
+              f"- Try again in a few moments\n" \
+              f"- Use the 🔐 New Session button to refresh tokens\n" \
+              f"- Check your internet connection\n\n" \
+              f"**Note:** The terminal and code execution features still work!"
+        return
+        
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"AI service HTTP error: {str(e)}")
+        if r.status_code == 401:
+            yield "**Error:** Authentication failed. Please use the 🔐 New Session button to refresh your tokens."
+        elif r.status_code == 429:
+            yield "**Error:** Rate limit exceeded. Please wait a moment and try again."
+        elif r.status_code >= 500:
+            yield "**Error:** AI service is temporarily experiencing issues. Please try again in a few minutes."
+        else:
+            yield f"**Error:** AI service returned HTTP {r.status_code}. Please try refreshing tokens with the 🔐 New Session button."
+        return
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"AI service request error: {str(e)}")
+        yield f"**Error:** Could not connect to the AI service. Details: {str(e)}\n\n" \
+              f"**Try:**\n" \
+              f"- Refreshing tokens with 🔐 New Session button\n" \
+              f"- Waiting a few moments and trying again\n\n" \
+              f"**Note:** You can still use the terminal and run code!"
+        return
+        
+    except Exception as e:
+        logger.error(f"Unexpected AI service error: {str(e)}")
+        yield f"**Error:** An unexpected error occurred: {str(e)}\n\n" \
+              f"Please try refreshing tokens with the 🔐 New Session button."
+        return
+    
+    finally:
+        session.close()
 
 # ====== Socket.IO Events ======
 @socketio.on('connect')
@@ -423,6 +511,7 @@ def upload_files():
                                     # Skip binary files
                                     continue
                         results.extend(extracted_files)
+                        # Add zip info for terminal processing
                         results.append({
                             "name": "__ZIP_INFO__",
                             "content": f"Extracted {len(extracted_files)} files from {f.filename}",
@@ -459,6 +548,7 @@ def chat():
     file_info_list = data.get("fileInfoList", [])
     is_continue = data.get("isContinue", False)
     
+    # Extract last code block for edit detection
     last_code = extract_last_code_block(messages)
     is_edit = is_code_edit_request(text, has_previous_code=bool(last_code))
 
@@ -468,6 +558,7 @@ def chat():
             bot_response += piece
             yield piece
         
+        # Check if response should have run button
         if should_show_run_button(bot_response):
             yield "\n\n__SHOW_RUN_BUTTON__"
 
@@ -475,22 +566,26 @@ def chat():
 
 @app.route("/regenerate", methods=["POST"])
 def regenerate():
+    """Regenerate the last bot response"""
     data = request.get_json(force=True, silent=True) or {}
     messages = data.get("messages", [])
     
     if not messages or messages[-1].get("role") != "bot":
         return jsonify({"error": "No bot message to regenerate"}), 400
     
+    # Get the user message that triggered the bot response
     user_messages = [msg for msg in messages if msg.get("role") == "user"]
     if not user_messages:
         return jsonify({"error": "No user message found"}), 400
     
     last_user_message = user_messages[-1]
+    # Remove the last bot message from history for regeneration
     regenerate_messages = messages[:-1]
     
     text = last_user_message.get("content", "")
     file_info_list = last_user_message.get("files", [])
     
+    # Extract last code block for edit detection
     last_code = extract_last_code_block(regenerate_messages)
     is_edit = is_code_edit_request(text, has_previous_code=bool(last_code))
 
@@ -500,6 +595,7 @@ def regenerate():
             bot_response += piece
             yield piece
         
+        # Check if response should have run button
         if should_show_run_button(bot_response):
             yield "\n\n__SHOW_RUN_BUTTON__"
 
@@ -526,23 +622,26 @@ def create_zip():
 
 @app.route("/run_code", methods=["POST"])
 def run_code():
+    """Create a new code execution environment"""
     data = request.get_json(force=True, silent=True) or {}
     code = data.get("code", "")
     session_id = data.get("session_id") or str(uuid.uuid4())
     file_list = data.get("files", [])
     
     try:
+        # Create container
         container_id = create_code_container(session_id)
         if not container_id:
             return jsonify({"error": "Failed to create execution environment"}), 500
         
-        base_url = "https://ng-x-sukuna-coder.onrender.com"  # Your Render URL
+        # Generate preview URL using your Render domain
+        base_url = "https://ng-x-sukuna-coder.onrender.com"
         preview_url = f"{base_url}/preview/{session_id}"
         
         preview_urls[session_id] = {
             "preview_url": preview_url,
             "created_at": time.time(),
-            "expires_at": time.time() + 300
+            "expires_at": time.time() + 300  # 5 minutes
         }
         
         return jsonify({
@@ -559,6 +658,7 @@ def run_code():
 @app.route("/preview/<session_id>")
 @app.route("/preview/<session_id>/<path:path>")
 def preview_code(session_id, path=""):
+    """Serve the code preview"""
     if session_id not in preview_urls:
         return "Preview session not found or expired", 404
     
@@ -569,6 +669,7 @@ def preview_code(session_id, path=""):
     
     workspace_dir = f"/tmp/workspace_{session_id}"
     
+    # Try to serve specific file if path is provided
     if path:
         file_path = os.path.join(workspace_dir, path)
         if os.path.exists(file_path) and os.path.isfile(file_path):
@@ -576,6 +677,7 @@ def preview_code(session_id, path=""):
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                 
+                # Determine content type
                 if path.endswith('.html'):
                     return Response(content, mimetype='text/html')
                 elif path.endswith('.css'):
@@ -587,7 +689,7 @@ def preview_code(session_id, path=""):
             except:
                 pass
     
-    # Check for index.html
+    # Check for index.html in workspace
     index_path = os.path.join(workspace_dir, "index.html")
     if os.path.exists(index_path):
         try:
@@ -601,6 +703,7 @@ def preview_code(session_id, path=""):
     if session_id in container_outputs:
         output = "".join(container_outputs[session_id][-50:])  # Last 50 lines
     
+    # Return execution environment status page
     return f"""
     <!DOCTYPE html>
     <html>
@@ -644,21 +747,16 @@ def preview_code(session_id, path=""):
                 cursor: pointer;
                 margin: 10px 0;
             }}
-            .file-list {{
-                background: #27293d;
-                padding: 15px;
-                border-radius: 8px;
-                margin: 10px 0;
-            }}
-            .file-item {{
-                background: #3b3d55;
-                padding: 8px 12px;
-                margin: 5px 0;
-                border-radius: 4px;
+            .back-btn {{
+                background: #28a745;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 5px;
                 cursor: pointer;
-            }}
-            .file-item:hover {{
-                background: #4a4c6b;
+                margin: 10px 5px;
+                text-decoration: none;
+                display: inline-block;
             }}
         </style>
     </head>
@@ -668,16 +766,34 @@ def preview_code(session_id, path=""):
             
             <div class="status">
                 <strong>Session ID:</strong> <code>{session_id}</code><br>
-                <strong>Status:</strong> Running<br>
-                <strong>Workspace:</strong> /tmp/workspace_{session_id}
+                <strong>Status:</strong> <span id="status">Running</span><br>
+                <strong>Workspace:</strong> <code>/tmp/workspace_{session_id}</code><br>
+                <strong>Expires:</strong> <span id="timer">5:00</span>
             </div>
             
+            <a href="https://ng-x-sukuna-coder.onrender.com" class="back-btn">🏠 Back to Chat</a>
             <button class="refresh-btn" onclick="location.reload()">🔄 Refresh</button>
             
             <div class="output" id="output">{output or 'No output yet... Execute commands in the terminal to see results here.'}</div>
         </div>
         
         <script>
+            // Countdown timer
+            let timeLeft = 300; // 5 minutes
+            function updateTimer() {{
+                const minutes = Math.floor(timeLeft / 60);
+                const seconds = timeLeft % 60;
+                document.getElementById('timer').textContent = `${{minutes}}:${{seconds.toString().padStart(2, '0')}}`;
+                timeLeft--;
+                if (timeLeft < 0) {{
+                    document.getElementById('status').textContent = 'Expired';
+                    document.getElementById('timer').textContent = '0:00';
+                }}
+            }}
+            
+            setInterval(updateTimer, 1000);
+            
+            // Auto-refresh output
             setInterval(() => {{
                 fetch('/get_output/{session_id}')
                     .then(r => r.json())
@@ -695,6 +811,7 @@ def preview_code(session_id, path=""):
 
 @app.route("/get_output/<session_id>")
 def get_output(session_id):
+    """Get execution output from container"""
     if session_id not in active_terminals:
         return jsonify({"error": "Terminal not found"}), 404
     
