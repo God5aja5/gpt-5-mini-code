@@ -344,104 +344,27 @@ def ai_payload(prompt, messages=None, file_info=None, is_edit_request=False, is_
 
 def workik_stream(prompt, messages=None, files=None, is_edit=False, is_continue=False, last_code=None):
     payload = ai_payload(prompt, messages=messages, file_info=files, is_edit_request=is_edit, is_continue=is_continue, last_code=last_code)
-    
-    # Create a session with better timeout and retry configuration
-    session = requests.Session()
-    session.headers.update(headers)
-    
-    # Add retries and timeout configuration
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
-    
-    retry_strategy = Retry(
-        total=3,
-        status_forcelist=[429, 500, 502, 503, 504],
-        method_whitelist=["HEAD", "GET", "POST"],
-        backoff_factor=1
-    )
-    
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    
     try:
-        logger.info(f"Connecting to AI service: {API_URL}")
-        
-        # Use session with proper timeouts
-        r = session.post(
-            API_URL, 
-            data=json.dumps(payload), 
-            stream=True, 
-            timeout=(10, 60),  # (connect_timeout, read_timeout)
-            verify=True  # Keep SSL verification enabled
-        )
+        r = requests.post(API_URL, headers=headers, data=json.dumps(payload), stream=True, timeout=None)
         r.raise_for_status()
-        
-        logger.info("Successfully connected to AI service")
-        
-        # Process the streaming response
-        for line in r.iter_lines(decode_unicode=True):
-            if not line:
-                continue
-            try:
-                # The API often sends 'data: ' prefix
-                if line.startswith('data: '):
-                    line = line[6:]
-                data = json.loads(line)
-                content = data.get("content")
-                if content:
-                    yield content
-            except (json.JSONDecodeError, AttributeError):
-                # Ignore lines that are not valid JSON or don't have the expected structure
-                continue
-                
-    except requests.exceptions.Timeout:
-        logger.error("AI service request timed out")
-        yield "**Error:** AI service request timed out. Please try again or refresh tokens using the 🔐 New Session button."
-        return
-        
-    except requests.exceptions.ConnectionError as e:
-        logger.error(f"AI service connection error: {str(e)}")
-        yield f"**Error:** Could not connect to AI service. This might be due to:\n\n" \
-              f"1. **Network connectivity issues**\n" \
-              f"2. **Service temporarily unavailable**\n" \
-              f"3. **Token expiration**\n\n" \
-              f"**Solutions:**\n" \
-              f"- Try again in a few moments\n" \
-              f"- Use the 🔐 New Session button to refresh tokens\n" \
-              f"- Check your internet connection\n\n" \
-              f"**Note:** The terminal and code execution features still work!"
-        return
-        
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"AI service HTTP error: {str(e)}")
-        if r.status_code == 401:
-            yield "**Error:** Authentication failed. Please use the 🔐 New Session button to refresh your tokens."
-        elif r.status_code == 429:
-            yield "**Error:** Rate limit exceeded. Please wait a moment and try again."
-        elif r.status_code >= 500:
-            yield "**Error:** AI service is temporarily experiencing issues. Please try again in a few minutes."
-        else:
-            yield f"**Error:** AI service returned HTTP {r.status_code}. Please try refreshing tokens with the 🔐 New Session button."
-        return
-        
     except requests.exceptions.RequestException as e:
-        logger.error(f"AI service request error: {str(e)}")
-        yield f"**Error:** Could not connect to the AI service. Details: {str(e)}\n\n" \
-              f"**Try:**\n" \
-              f"- Refreshing tokens with 🔐 New Session button\n" \
-              f"- Waiting a few moments and trying again\n\n" \
-              f"**Note:** You can still use the terminal and run code!"
+        yield f"Error: Could not connect to the AI service. Details: {str(e)}"
         return
-        
-    except Exception as e:
-        logger.error(f"Unexpected AI service error: {str(e)}")
-        yield f"**Error:** An unexpected error occurred: {str(e)}\n\n" \
-              f"Please try refreshing tokens with the 🔐 New Session button."
-        return
-    
-    finally:
-        session.close()
+
+    for line in r.iter_lines(decode_unicode=True):
+        if not line:
+            continue
+        try:
+            # The API often sends 'data: ' prefix
+            if line.startswith('data: '):
+                line = line[6:]
+            data = json.loads(line)
+            content = data.get("content")
+            if content:
+                yield content
+        except (json.JSONDecodeError, AttributeError):
+            # Ignore lines that are not valid JSON or don't have the expected structure
+            continue
 
 # ====== Socket.IO Events ======
 @socketio.on('connect')
