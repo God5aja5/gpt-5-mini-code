@@ -7,7 +7,6 @@ import re
 import zipfile
 import io
 import mimetypes
-import docker
 import threading
 import time
 import tempfile
@@ -16,16 +15,21 @@ from flask import Flask, request, Response, jsonify, send_from_directory, stream
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import subprocess
 import signal
+import logging
 
 app = Flask(__name__, static_url_path="", static_folder=".")
-app.config['SECRET_KEY'] = 'your-secret-key'
-socketio = SocketIO(app, cors_allowed_origins="*")
+app.config['SECRET_KEY'] = 'your-secret-key-here'
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ====== Workik API Setup (GPT-5 mini only) ======
 API_URL = "https://wfhbqniijcsamdp2v3i6nts4ke0ebkyj.lambda-url.us-east-1.on.aws/api_ai_playground/ai/playground/ai/trigger"
 WORKIK_TOKEN = os.getenv("WORKIK_TOKEN", "undefined")
 
-# Default tokens (will be overridden by tokens.txt if present)
+# Default tokens
 DEFAULT_WK_LD = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoibG9jYWwiLCJzZXNzaW9uX2lkIjoiMTc1NjM4ODE4MyIsInJlcXVlc3RfY291bnQiOjAsImV4cCI6MTc1Njk5Mjk4M30.JbAEBmTbWtyysFGDftxRJvqy1LvJfIR1W-HVv_Ss-7U"
 DEFAULT_WK_CK = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoiY29va2llIiwic2Vzc2lvbl9pZCI6IjE3NTYzODgxODMiLCJyZXF1ZXN0X2NvdW50IjowLCJleHAiOjE3NTY5OTI5ODN9.Fua9aRmHJLPte8cF807w4jHA6Ff1GPwGAaOWcY9P7Us"
 
@@ -49,42 +53,55 @@ headers = {
     "referer": "https://workik.com/"
 }
 
-# ====== Docker & Terminal Management ======
-try:
-    docker_client = docker.from_env()
-except:
-    docker_client = None
-
+# ====== Container Management (using subprocess instead of Docker) ======
 active_containers = {}
 active_terminals = {}
 preview_urls = {}
+container_outputs = {}
 
 class TerminalManager:
-    def __init__(self, container_id):
-        self.container_id = container_id
-        self.container = docker_client.containers.get(container_id)
-        self.exec_id = None
-        self.process = None
+    def __init__(self, session_id):
+        self.session_id = session_id
+        self.workspace_dir = f"/tmp/workspace_{session_id}"
+        os.makedirs(self.workspace_dir, exist_ok=True)
+        self.current_process = None
         
     def execute_command(self, command, room_id):
         try:
-            exec_result = self.container.exec_run(
-                command, 
-                tty=True, 
-                stdin=True, 
-                stdout=True, 
-                stderr=True,
-                stream=True,
-                socket=True
+            # Change to workspace directory
+            os.chdir(self.workspace_dir)
+            
+            # Execute command
+            process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                bufsize=1
             )
             
-            for chunk in exec_result.output:
-                if chunk:
-                    output = chunk.decode('utf-8', errors='ignore')
+            # Stream output in real-time
+            for line in iter(process.stdout.readline, ''):
+                if line:
                     socketio.emit('terminal_output', {
-                        'output': output,
+                        'output': line,
                         'type': 'stdout'
                     }, room=room_id)
+                    
+                    # Store output for preview
+                    if self.session_id not in container_outputs:
+                        container_outputs[self.session_id] = []
+                    container_outputs[self.session_id].append(line)
+            
+            process.stdout.close()
+            return_code = process.wait()
+            
+            if return_code != 0:
+                socketio.emit('terminal_output', {
+                    'output': f"Command exited with code {return_code}\n",
+                    'type': 'stderr'
+                }, room=room_id)
                     
         except Exception as e:
             socketio.emit('terminal_output', {
@@ -93,68 +110,54 @@ class TerminalManager:
             }, room=room_id)
 
 def create_code_container(session_id):
-    """Create a new Docker container for code execution"""
-    if not docker_client:
-        return None
-        
+    """Create a new execution environment"""
     try:
-        # Create container with Ubuntu and common development tools
-        container = docker_client.containers.run(
-            "ubuntu:22.04",
-            command="bash",
-            detach=True,
-            tty=True,
-            stdin_open=True,
-            working_dir="/workspace",
-            volumes={tempfile.gettempdir(): {'bind': '/tmp', 'mode': 'rw'}},
-            name=f"code_executor_{session_id}",
-            remove=True,
-            mem_limit="512m",
-            cpu_period=100000,
-            cpu_quota=50000
-        )
+        workspace_dir = f"/tmp/workspace_{session_id}"
+        os.makedirs(workspace_dir, exist_ok=True)
         
         # Install basic tools
         setup_commands = [
-            "apt-get update",
-            "apt-get install -y python3 python3-pip nodejs npm curl wget unzip git",
-            "apt-get install -y build-essential",
-            "mkdir -p /workspace",
-            "cd /workspace"
+            "which python3 || (apt-get update && apt-get install -y python3 python3-pip)",
+            "which node || (curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && apt-get install -y nodejs)",
+            "which git || apt-get install -y git curl wget unzip"
         ]
         
         for cmd in setup_commands:
-            container.exec_run(cmd, detach=False)
-            
-        active_containers[session_id] = container.id
-        active_terminals[session_id] = TerminalManager(container.id)
+            try:
+                subprocess.run(cmd, shell=True, cwd=workspace_dir, timeout=60)
+            except:
+                pass
+        
+        active_terminals[session_id] = TerminalManager(session_id)
+        container_outputs[session_id] = []
         
         # Set expiry timer (5 minutes)
         timer = threading.Timer(300, cleanup_container, args=[session_id])
         timer.start()
         
-        return container.id
+        return session_id
         
     except Exception as e:
-        print(f"Error creating container: {e}")
+        logger.error(f"Error creating container: {e}")
         return None
 
 def cleanup_container(session_id):
     """Clean up container and related resources"""
     try:
-        if session_id in active_containers:
-            container = docker_client.containers.get(active_containers[session_id])
-            container.stop(timeout=5)
-            del active_containers[session_id]
-            
         if session_id in active_terminals:
+            workspace_dir = f"/tmp/workspace_{session_id}"
+            if os.path.exists(workspace_dir):
+                shutil.rmtree(workspace_dir, ignore_errors=True)
             del active_terminals[session_id]
             
         if session_id in preview_urls:
             del preview_urls[session_id]
             
+        if session_id in container_outputs:
+            del container_outputs[session_id]
+            
     except Exception as e:
-        print(f"Error cleaning up container: {e}")
+        logger.error(f"Error cleaning up container: {e}")
 
 def load_tokens_from_file():
     global _current_tokens
@@ -205,7 +208,6 @@ def is_code_edit_request(text, has_previous_code=False):
     
     t = text.strip().lower()
     
-    # Strong edit indicators
     strong_edit_triggers = [
         "edit the code", "modify the code", "update the code", "change the code",
         "add to the code", "edit this", "modify this", "update this",
@@ -213,18 +215,15 @@ def is_code_edit_request(text, has_previous_code=False):
         "fix the code", "refactor the code", "optimize the code"
     ]
     
-    # Weaker indicators that need previous code context
     weak_edit_triggers = [
         "add", "include", "also add", "now add", "please add",
         "integrate", "implement", "enhance", "extend"
     ]
     
-    # Check strong indicators first
     for trigger in strong_edit_triggers:
         if trigger in t:
             return True
     
-    # Check weak indicators only if there's previous code
     if has_previous_code:
         for trigger in weak_edit_triggers:
             if trigger in t and any(word in t for word in ["function", "feature", "method", "class", "variable", "property", "support", "functionality"]):
@@ -238,16 +237,26 @@ def should_show_run_button(content):
         return False
         
     # Check for code blocks
-    has_code_block = '```Code Box' in content or '```html' in content or '```python' in content or '```javascript' in content
+    has_code_block = any(marker in content for marker in [
+        '```Code Box', '```html', '```python', '```javascript', 
+        '```js', '```py', '```java', '```cpp', '```c++'
+    ])
     
-    # Check for web-related keywords
-    web_keywords = ['html', 'css', 'javascript', 'website', 'web page', 'frontend', 'backend', 'server', 'app']
-    has_web_content = any(keyword in content.lower() for keyword in web_keywords)
+    # Check for programming keywords
+    programming_keywords = [
+        'def ', 'import ', 'print(', 'if __name__', 'python',
+        'function ', 'const ', 'let ', 'var ', 'console.log', 'require(',
+        'html', 'css', 'javascript', 'website', 'web page', 'frontend', 'backend',
+        'code', 'script', 'program', 'execute', 'run', 'flask', 'django', 'fastapi',
+        'express', 'node', 'react', 'vue', 'angular'
+    ]
     
-    return has_code_block and (has_web_content or 'python' in content.lower() or 'node' in content.lower())
+    content_lower = content.lower()
+    has_programming_content = any(keyword in content_lower for keyword in programming_keywords)
+    
+    return has_code_block or has_programming_content
 
 def ai_payload(prompt, messages=None, file_info=None, is_edit_request=False, is_continue=False, last_code=None):
-    # Enhanced system instructions with terminal capabilities
     system_instructions = (
         "You are Gpt 5 mini with terminal access. Rules:\n"
         "1) Always place any code inside triple backticks with 'Code Box' as the language identifier, like:\n"
@@ -263,15 +272,15 @@ def ai_payload(prompt, messages=None, file_info=None, is_edit_request=False, is_
         "9) Always provide complete, working code solutions.\n"
         "10) When providing code that can be executed (web apps, Python scripts, etc.), mention that it can be run using the Run Code button.\n"
         "11) If you need to install packages or debug errors, provide the exact terminal commands needed.\n"
-        "12) For web applications, always include proper HTML structure with CSS and JavaScript if needed."
+        "12) For web applications, always include proper HTML structure with CSS and JavaScript if needed.\n"
+        "13) For Python apps, include all necessary imports and proper error handling.\n"
+        "14) For Node.js apps, include package.json and proper dependencies."
     )
 
-    # If it's an edit request and we have previous code, include it in the context
     if is_edit_request and last_code:
         enhanced_prompt = f"Here's the existing code:\n\n```Code Box\n{last_code}\n```\n\nUser request: {prompt}\n\nPlease edit the above code according to the user's request and return the complete updated code."
         prompt = enhanced_prompt
 
-    # If it's a continue request, add continue instruction
     if is_continue:
         prompt = f"Continue from where you left off: {prompt}"
 
@@ -285,11 +294,9 @@ def ai_payload(prompt, messages=None, file_info=None, is_edit_request=False, is_
                 "mime": f.get("mime", "text/plain")
             })
     
-    # Ensure messages are in the correct format for the API
     api_messages = []
     if messages:
         for msg in messages:
-            # The API might expect 'assistant' instead of 'bot'
             role = "assistant" if msg.get("role") == "bot" else msg.get("role")
             api_messages.append({"role": role, "content": msg.get("content")})
 
@@ -339,7 +346,6 @@ def workik_stream(prompt, messages=None, files=None, is_edit=False, is_continue=
         if not line:
             continue
         try:
-            # The API often sends 'data: ' prefix
             if line.startswith('data: '):
                 line = line[6:]
             data = json.loads(line)
@@ -347,17 +353,16 @@ def workik_stream(prompt, messages=None, files=None, is_edit=False, is_continue=
             if content:
                 yield content
         except (json.JSONDecodeError, AttributeError):
-            # Ignore lines that are not valid JSON or don't have the expected structure
             continue
 
 # ====== Socket.IO Events ======
 @socketio.on('connect')
 def handle_connect():
-    print('Client connected')
+    logger.info('Client connected')
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print('Client disconnected')
+    logger.info('Client disconnected')
 
 @socketio.on('join_terminal')
 def handle_join_terminal(data):
@@ -372,8 +377,8 @@ def handle_terminal_command(data):
     
     if session_id in active_terminals:
         terminal = active_terminals[session_id]
-        # Execute command in background thread
         thread = threading.Thread(target=terminal.execute_command, args=(command, session_id))
+        thread.daemon = True
         thread.start()
     else:
         emit('terminal_output', {
@@ -406,15 +411,18 @@ def upload_files():
                         extracted_files = []
                         for name in zip_ref.namelist():
                             if not name.endswith('/') and '__MACOSX' not in name and zip_ref.getinfo(name).file_size > 0:
-                                content = zip_ref.read(name).decode('utf-8')
-                                mime_type, _ = mimetypes.guess_type(name)
-                                extracted_files.append({
-                                    "name": name,
-                                    "content": content,
-                                    "mime": mime_type or 'text/plain'
-                                })
+                                try:
+                                    content = zip_ref.read(name).decode('utf-8')
+                                    mime_type, _ = mimetypes.guess_type(name)
+                                    extracted_files.append({
+                                        "name": name,
+                                        "content": content,
+                                        "mime": mime_type or 'text/plain'
+                                    })
+                                except UnicodeDecodeError:
+                                    # Skip binary files
+                                    continue
                         results.extend(extracted_files)
-                        # Add zip info for terminal processing
                         results.append({
                             "name": "__ZIP_INFO__",
                             "content": f"Extracted {len(extracted_files)} files from {f.filename}",
@@ -423,8 +431,6 @@ def upload_files():
                         })
                 except zipfile.BadZipFile:
                     return jsonify({"error": "Invalid or corrupted ZIP file"}), 400
-                except UnicodeDecodeError:
-                    return jsonify({"error": f"Files in the ZIP must be valid text (UTF-8)."}), 400
                 except Exception as e:
                     return jsonify({"error": f"Error processing ZIP: {str(e)}"}), 500
             else:
@@ -453,7 +459,6 @@ def chat():
     file_info_list = data.get("fileInfoList", [])
     is_continue = data.get("isContinue", False)
     
-    # Extract last code block for edit detection
     last_code = extract_last_code_block(messages)
     is_edit = is_code_edit_request(text, has_previous_code=bool(last_code))
 
@@ -463,7 +468,6 @@ def chat():
             bot_response += piece
             yield piece
         
-        # Check if response should have run button
         if should_show_run_button(bot_response):
             yield "\n\n__SHOW_RUN_BUTTON__"
 
@@ -471,26 +475,22 @@ def chat():
 
 @app.route("/regenerate", methods=["POST"])
 def regenerate():
-    """Regenerate the last bot response"""
     data = request.get_json(force=True, silent=True) or {}
     messages = data.get("messages", [])
     
     if not messages or messages[-1].get("role") != "bot":
         return jsonify({"error": "No bot message to regenerate"}), 400
     
-    # Get the user message that triggered the bot response
     user_messages = [msg for msg in messages if msg.get("role") == "user"]
     if not user_messages:
         return jsonify({"error": "No user message found"}), 400
     
     last_user_message = user_messages[-1]
-    # Remove the last bot message from history for regeneration
     regenerate_messages = messages[:-1]
     
     text = last_user_message.get("content", "")
     file_info_list = last_user_message.get("files", [])
     
-    # Extract last code block for edit detection
     last_code = extract_last_code_block(regenerate_messages)
     is_edit = is_code_edit_request(text, has_previous_code=bool(last_code))
 
@@ -500,7 +500,6 @@ def regenerate():
             bot_response += piece
             yield piece
         
-        # Check if response should have run button
         if should_show_run_button(bot_response):
             yield "\n\n__SHOW_RUN_BUTTON__"
 
@@ -527,27 +526,23 @@ def create_zip():
 
 @app.route("/run_code", methods=["POST"])
 def run_code():
-    """Create a new code execution environment"""
     data = request.get_json(force=True, silent=True) or {}
     code = data.get("code", "")
     session_id = data.get("session_id") or str(uuid.uuid4())
     file_list = data.get("files", [])
     
-    if not docker_client:
-        return jsonify({"error": "Docker not available"}), 500
-    
     try:
-        # Create container
         container_id = create_code_container(session_id)
         if not container_id:
             return jsonify({"error": "Failed to create execution environment"}), 500
         
-        # Generate preview URL (this would be your domain + session_id)
-        preview_url = f"https://{request.host}/preview/{session_id}"
+        base_url = "https://ng-x-sukuna-coder.onrender.com"  # Your Render URL
+        preview_url = f"{base_url}/preview/{session_id}"
+        
         preview_urls[session_id] = {
-            "url": preview_url,
+            "preview_url": preview_url,
             "created_at": time.time(),
-            "expires_at": time.time() + 300  # 5 minutes
+            "expires_at": time.time() + 300
         }
         
         return jsonify({
@@ -562,8 +557,8 @@ def run_code():
         return jsonify({"error": f"Failed to create execution environment: {str(e)}"}), 500
 
 @app.route("/preview/<session_id>")
-def preview_code(session_id):
-    """Serve the code preview"""
+@app.route("/preview/<session_id>/<path:path>")
+def preview_code(session_id, path=""):
     if session_id not in preview_urls:
         return "Preview session not found or expired", 404
     
@@ -572,36 +567,145 @@ def preview_code(session_id):
         cleanup_container(session_id)
         return "Preview session expired", 410
     
-    # Serve index.html from the container if it exists
-    try:
-        if session_id in active_containers:
-            container = docker_client.containers.get(active_containers[session_id])
-            # Try to get index.html content
+    workspace_dir = f"/tmp/workspace_{session_id}"
+    
+    if path:
+        file_path = os.path.join(workspace_dir, path)
+        if os.path.exists(file_path) and os.path.isfile(file_path):
             try:
-                exec_result = container.exec_run("cat /workspace/index.html")
-                if exec_result.exit_code == 0:
-                    return exec_result.output.decode('utf-8')
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                if path.endswith('.html'):
+                    return Response(content, mimetype='text/html')
+                elif path.endswith('.css'):
+                    return Response(content, mimetype='text/css')
+                elif path.endswith('.js'):
+                    return Response(content, mimetype='application/javascript')
+                else:
+                    return Response(content, mimetype='text/plain')
             except:
                 pass
-                
-            # Fallback to simple HTML
-            return """
-            <html>
-            <head><title>Code Preview</title></head>
-            <body>
-                <h1>Code Preview</h1>
-                <p>Your code is running in the terminal. Check the chat for output.</p>
-                <script>
-                    // Auto-refresh every 2 seconds
-                    setTimeout(() => location.reload(), 2000);
-                </script>
-            </body>
-            </html>
-            """
-    except:
-        pass
     
-    return "Error loading preview", 500
+    # Check for index.html
+    index_path = os.path.join(workspace_dir, "index.html")
+    if os.path.exists(index_path):
+        try:
+            with open(index_path, 'r', encoding='utf-8') as f:
+                return Response(f.read(), mimetype='text/html')
+        except:
+            pass
+    
+    # Get output for display
+    output = ""
+    if session_id in container_outputs:
+        output = "".join(container_outputs[session_id][-50:])  # Last 50 lines
+    
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Code Execution - {session_id}</title>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {{ 
+                font-family: 'Consolas', 'Monaco', monospace; 
+                padding: 20px; 
+                background: #1e1e2f; 
+                color: #e0e0e0; 
+                line-height: 1.6;
+            }}
+            .container {{ max-width: 800px; margin: 0 auto; }}
+            .status {{ 
+                background: #27293d; 
+                padding: 15px; 
+                border-radius: 8px; 
+                margin: 10px 0;
+                border-left: 4px solid #5a87ff;
+            }}
+            .output {{ 
+                background: #161625; 
+                padding: 15px; 
+                border-radius: 8px; 
+                margin: 10px 0;
+                font-family: 'Courier New', monospace;
+                white-space: pre-wrap;
+                max-height: 400px;
+                overflow-y: auto;
+                border: 1px solid #3b3d55;
+            }}
+            .refresh-btn {{
+                background: #5a87ff;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 5px;
+                cursor: pointer;
+                margin: 10px 0;
+            }}
+            .file-list {{
+                background: #27293d;
+                padding: 15px;
+                border-radius: 8px;
+                margin: 10px 0;
+            }}
+            .file-item {{
+                background: #3b3d55;
+                padding: 8px 12px;
+                margin: 5px 0;
+                border-radius: 4px;
+                cursor: pointer;
+            }}
+            .file-item:hover {{
+                background: #4a4c6b;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🚀 Code Execution Environment</h1>
+            
+            <div class="status">
+                <strong>Session ID:</strong> <code>{session_id}</code><br>
+                <strong>Status:</strong> Running<br>
+                <strong>Workspace:</strong> /tmp/workspace_{session_id}
+            </div>
+            
+            <button class="refresh-btn" onclick="location.reload()">🔄 Refresh</button>
+            
+            <div class="output" id="output">{output or 'No output yet... Execute commands in the terminal to see results here.'}</div>
+        </div>
+        
+        <script>
+            setInterval(() => {{
+                fetch('/get_output/{session_id}')
+                    .then(r => r.json())
+                    .then(data => {{
+                        if (data.output) {{
+                            document.getElementById('output').textContent = data.output;
+                        }}
+                    }})
+                    .catch(e => console.log('Fetch error:', e));
+            }}, 2000);
+        </script>
+    </body>
+    </html>
+    """
+
+@app.route("/get_output/<session_id>")
+def get_output(session_id):
+    if session_id not in active_terminals:
+        return jsonify({"error": "Terminal not found"}), 404
+    
+    output = ""
+    if session_id in container_outputs:
+        output = "".join(container_outputs[session_id])
+    
+    return jsonify({
+        "status": "running",
+        "output": output
+    })
 
 # ====== Token refresh helpers ======
 def extract_tokens_from_response(text):
@@ -671,15 +775,6 @@ def apply_tokens():
     append_tokens_to_file(wk_ld, wk_ck, coding_language=coding_language)
     return jsonify({"ok": True}), 200
 
-# ... (all your existing code stays the same until the very end)
-
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
-    
-    # Check if running in production (Render sets this)
-    if os.getenv("RENDER"):
-        # Production mode - use gunicorn (started by Render)
-        socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)
-    else:
-        # Development mode
-        socketio.run(app, host="0.0.0.0", port=port, debug=True, allow_unsafe_werkzeug=True)
+    socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)
