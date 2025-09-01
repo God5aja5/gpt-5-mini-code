@@ -1,6 +1,6 @@
 FROM python:3.9-slim
 
-# Install system dependencies including Docker
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
     wget \
@@ -9,6 +9,10 @@ RUN apt-get update && apt-get install -y \
     nodejs \
     npm \
     build-essential \
+    apt-transport-https \
+    ca-certificates \
+    gnupg \
+    lsb-release \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Docker
@@ -26,8 +30,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
+# Make start script executable
+RUN chmod +x start.sh
+
 # Expose port
 EXPOSE 5000
 
-# Run the application
-CMD ["python", "app.py"]
+# Use the start script
+CMD ["./start.sh"]
