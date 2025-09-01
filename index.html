@@ -881,7 +881,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (codeBlocks) {
                     codeBlocks.forEach(block => {
                         const content = block.replace(/```Code Box\n|```/g, '').trim();
-                        files.push({ name: `temp_file_${uuidv4()}.py`, content: content });
+                        files.push({ name: `temp_file_${Date.now()}.py`, content: content });
                     });
                 }
             }
