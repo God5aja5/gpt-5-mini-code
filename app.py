@@ -16,6 +16,8 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 import subprocess
 import signal
 import logging
+from retrying import retry
+import urllib3
 
 app = Flask(__name__, static_url_path="", static_folder=".")
 app.config['SECRET_KEY'] = 'your-secret-key-here'
@@ -342,26 +344,34 @@ def ai_payload(prompt, messages=None, file_info=None, is_edit_request=False, is_
     }
     return payload
 
-def check_internet_connection():
-    """Checks for an active internet connection by pinging a reliable server."""
-    try:
-        requests.get("[https://www.google.com](https://www.google.com)", timeout=5)
-        return True
-    except requests.exceptions.RequestException:
-        return False
+def is_retryable_exception(exception):
+    """
+    Check if the exception is due to a network or DNS issue.
+    """
+    logger.warning(f"Encountered a retryable exception: {type(exception).__name__} - {exception}")
+    return isinstance(exception, (
+        requests.exceptions.Timeout,
+        requests.exceptions.ConnectionError,
+        urllib3.exceptions.MaxRetryError,
+        urllib3.exceptions.NewConnectionError,
+        requests.exceptions.HTTPError,
+    ))
+
+@retry(wait_exponential_multiplier=1000, wait_exponential_max=10000, stop_max_attempt_number=5, retry_on_exception=is_retryable_exception)
+def make_workik_request(payload, headers):
+    """A helper function to make the retriable request."""
+    logger.info("Attempting to send request to Workik API...")
+    r = requests.post(API_URL, headers=headers, data=json.dumps(payload), stream=True, timeout=30)
+    r.raise_for_status()
+    return r
 
 def workik_stream(prompt, messages=None, files=None, is_edit=False, is_continue=False, last_code=None):
-    if not check_internet_connection():
-        logger.error("❌ No internet connection detected. Aborting AI request.")
-        yield "Error: No internet connection detected. Please check your network and try again."
-        return
-
-    logger.info("✅ Internet connection present. Attempting to connect to AI service.")
     payload = ai_payload(prompt, messages=messages, file_info=files, is_edit_request=is_edit, is_continue=is_continue, last_code=last_code)
     try:
-        r = requests.post(API_URL, headers=headers, data=json.dumps(payload), stream=True, timeout=None)
-        r.raise_for_status()
+        r = make_workik_request(payload, headers)
+        logger.info("✅ Successfully connected to Workik API.")
     except requests.exceptions.RequestException as e:
+        logger.error(f"❌ Failed to connect to the AI service after multiple retries. Details: {e}")
         yield f"Error: Could not connect to the AI service. Details: {str(e)}"
         return
 
