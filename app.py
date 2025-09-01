@@ -671,6 +671,15 @@ def apply_tokens():
     append_tokens_to_file(wk_ld, wk_ck, coding_language=coding_language)
     return jsonify({"ok": True}), 200
 
+# ... (all your existing code stays the same until the very end)
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
-    socketio.run(app, host="0.0.0.0", port=port, debug=False)
+    
+    # Check if running in production (Render sets this)
+    if os.getenv("RENDER"):
+        # Production mode - use gunicorn (started by Render)
+        socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)
+    else:
+        # Development mode
+        socketio.run(app, host="0.0.0.0", port=port, debug=True, allow_unsafe_werkzeug=True)
