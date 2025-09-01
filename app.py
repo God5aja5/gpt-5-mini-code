@@ -11,6 +11,8 @@ import subprocess
 import threading
 import time
 import queue
+import shutil
+import socket
 
 from flask import Flask, request, Response, jsonify, send_from_directory, stream_with_context, send_file
 from werkzeug.serving import is_running_from_reloader
@@ -447,7 +449,6 @@ def start_shell_session(session_id, project_path):
             return terminal_sessions[session_id]
 
         output_queue = queue.Queue()
-        is_running = True
         preview_port = find_free_port()
         if not preview_port:
             output_queue.put("Error: Could not find a free port to serve the application.")
@@ -467,21 +468,15 @@ def start_shell_session(session_id, project_path):
             except Exception as e:
                 q.put(f"\nAn error occurred in the terminal process: {e}")
             finally:
-                is_running = False
                 q.put(None)  # Signal that the process is done
 
-        def read_pipe(pipe, q):
-            for line in iter(pipe.readline, b''):
-                q.put(line.decode('utf-8'))
-            pipe.close()
-            
         process = subprocess.Popen(
             ['/bin/bash'],
             cwd=project_path,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
+            text=False,  # Use binary mode to avoid text encoding issues with pipes
             bufsize=1
         )
         
@@ -498,7 +493,30 @@ def start_shell_session(session_id, project_path):
             "preview_url": f"http://localhost:{preview_port}"
         }
         
-        return process, output_port
+        return process, preview_port
+
+@app.route("/start_terminal", methods=["POST"])
+def start_terminal():
+    data = request.get_json(force=True, silent=True) or {}
+    files = data.get("files", [])
+    
+    if not files:
+        return jsonify({"error": "No files provided to create a project."}), 400
+
+    session_id = str(uuid.uuid4())
+    project_path = os.path.join(PROJECTS_DIR, session_id)
+    os.makedirs(project_path)
+
+    for file_data in files:
+        file_path = os.path.join(project_path, file_data["name"])
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(file_data["content"])
+        except Exception as e:
+            return jsonify({"error": f"Failed to write file {file_data['name']}: {str(e)}"}), 500
+
+    start_shell_session(session_id, project_path)
+    return jsonify({"session_id": session_id})
 
 def run_command(session_id, command):
     with session_lock:
@@ -507,7 +525,7 @@ def run_command(session_id, command):
             return {"error": "Terminal session not active."}
         
         try:
-            session['process'].stdin.write(command + '\n')
+            session['process'].stdin.write(command.encode('utf-8') + b'\n')
             session['process'].stdin.flush()
             return {"success": True}
         except Exception as e:
@@ -564,7 +582,5 @@ def before_request_hook():
         cleanup_old_sessions()
         
 if __name__ == "__main__":
-    import socket
-    import shutil
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
