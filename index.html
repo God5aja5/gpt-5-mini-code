@@ -51,6 +51,7 @@
         .message { display: flex; gap: 0.75rem; }
         .message.user { flex-direction: row-reverse; }
         .message.bot { flex-direction: row; }
+        .message.system { justify-content: center; }
         .avatar { width: 2.5rem; height: 2.5rem; border-radius: 50%; background-color: var(--bg-dark-tertiary); color: var(--text-secondary); display: flex; justify-content: center; align-items: center; font-size: 1.2rem; flex-shrink: 0; }
         .message-body { display: flex; flex-direction: column; align-items: flex-start; max-width: calc(100% - 3.25rem); }
         .message.user .message-body { align-items: flex-end; }
@@ -129,6 +130,7 @@
         .btn { background: var(--bg-dark-tertiary); border: 1px solid var(--border-color); color: var(--text-primary); padding: 0.5rem 0.75rem; border-radius: 0.5rem; cursor: pointer; }
         .btn.primary { background: var(--accent-primary); color: white; border-color: var(--accent-primary); }
         .btn.danger { background: var(--accent-danger); color: white; border-color: var(--accent-danger); }
+        
         @media (max-width: 768px) {
             .app-layout { grid-template-columns: 1fr; }
             .sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: 85%; max-width: 320px; transform: translateX(-100%); z-index: 1000; box-shadow: 5px 0 15px var(--shadow-color); transition: transform 0.3s ease; }
@@ -223,8 +225,6 @@ document.addEventListener('DOMContentLoaded', () => {
         isLoading: false,
         attachedFileContent: [],
     };
-    
-    const fileSupportedModels = ['gpt-5-mini'];
 
     // Initialize Socket.IO
     function initSocket() {
@@ -308,7 +308,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function addMessageToUI(msg, isStreaming = false) {
-        const { role, content, files } = msg;
+        const { role, content, files, type } = msg;
         const wrapper = document.createElement('div');
         wrapper.className = 'message-wrapper';
         wrapper.dataset.role = role;
@@ -318,7 +318,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const avatar = document.createElement('div');
         avatar.className = 'avatar';
-        avatar.textContent = role === 'user' ? 'U' : '🤖';
+        
+        if (role === 'system') {
+            avatar.textContent = '⚙️';
+        } else {
+            avatar.textContent = role === 'user' ? 'U' : '🤖';
+        }
 
         const messageBody = document.createElement('div');
         messageBody.className = 'message-body';
@@ -326,6 +331,14 @@ document.addEventListener('DOMContentLoaded', () => {
         const messageContent = document.createElement('div');
         messageContent.className = 'message-content';
         messageContent.dataset.rawContent = content || '';
+
+        // Special styling for system messages
+        if (role === 'system') {
+            messageContent.style.background = 'var(--bg-dark-tertiary)';
+            messageContent.style.color = 'var(--text-secondary)';
+            messageContent.style.fontStyle = 'italic';
+            messageContent.style.textAlign = 'center';
+        }
 
         if (role === 'user' && files && files.length > 0) {
             const filesContainer = document.createElement('div');
@@ -335,7 +348,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 
                 if (file.is_zip) {
                     fileEl.innerHTML = `<span class="file-preview-icon">📦</span><span class="file-preview-name">Extracted ZIP: ${file.content}</span>`;
-                    // Show unzipping message in terminal if terminal is open
                     if (currentTerminalSession) {
                         addToChat(`→ Unzipping and analyzing files...`, 'system');
                     }
@@ -354,6 +366,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (role === 'bot' && isStreaming && content === 'typing') {
             textContentDiv.innerHTML = `<div class="typing-indicator"><span></span><span></span><span></span></div>`;
+        } else if (role === 'system') {
+            textContentDiv.textContent = content;
         } else {
             const parsed = parseBotResponse(content || '');
             const renderedMarkdown = marked.parse(parsed.content || '', { gfm: true, breaks: true });
@@ -367,7 +381,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 textContentDiv.appendChild(downloadBtn);
             }
             
-            if (parsed.showRunButton && !isStreaming) {
+            if (parsed.showRunButton && !isStreaming && role === 'bot') {
                 const runInfo = document.createElement('div');
                 runInfo.className = 'preview-info';
                 runInfo.innerHTML = `
@@ -384,34 +398,30 @@ document.addEventListener('DOMContentLoaded', () => {
         messageContent.appendChild(textContentDiv);
         messageBody.appendChild(messageContent);
         
-        // Add action buttons
-        if (!isStreaming) {
+        // Add action buttons (except for system messages)
+        if (!isStreaming && role !== 'system') {
             const actionsDiv = document.createElement('div');
             actionsDiv.className = 'message-actions';
             
             if (role === 'user') {
-                // Copy button for user messages
                 const copyBtn = document.createElement('button');
                 copyBtn.className = 'action-btn copy';
                 copyBtn.innerHTML = '📋 Copy';
                 copyBtn.onclick = () => copyToClipboard(content || '', copyBtn);
                 actionsDiv.appendChild(copyBtn);
             } else if (role === 'bot') {
-                // Copy button for bot messages
                 const copyBtn = document.createElement('button');
                 copyBtn.className = 'action-btn copy';
                 copyBtn.innerHTML = '📋 Copy';
                 copyBtn.onclick = () => copyToClipboard(content || '', copyBtn);
                 actionsDiv.appendChild(copyBtn);
                 
-                // Regenerate button
                 const regenerateBtn = document.createElement('button');
                 regenerateBtn.className = 'action-btn regenerate';
                 regenerateBtn.innerHTML = '🔄 Regenerate';
                 regenerateBtn.onclick = () => regenerateResponse();
                 actionsDiv.appendChild(regenerateBtn);
                 
-                // Continue button (show if response seems incomplete)
                 if (isResponseIncomplete(content || '')) {
                     const continueBtn = document.createElement('button');
                     continueBtn.className = 'action-btn continue';
@@ -435,14 +445,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function isResponseIncomplete(content) {
-        // Check if response seems incomplete
         const indicators = [
             content.length > 1000 && !content.trim().endsWith('.'),
-            content.includes('```') && (content.split('```').length % 2 === 0), // Unmatched code blocks
+            content.includes('```') && (content.split('```').length % 2 === 0),
             content.trim().endsWith('...'),
             content.includes('Let me continue'),
             content.includes('I\'ll continue'),
-            /\b(continuing|more|next|further)\b/i.test(content.slice(-100)) // Last 100 chars
+            /\b(continuing|more|next|further)\b/i.test(content.slice(-100))
         ];
         return indicators.some(indicator => indicator);
     }
@@ -469,7 +478,6 @@ document.addEventListener('DOMContentLoaded', () => {
         setLoadingState(true);
         const currentChat = appState.chats[appState.currentChatId];
         
-        // Remove the last bot message
         if (currentChat.messages.length > 0 && currentChat.messages[currentChat.messages.length - 1].role === 'bot') {
             currentChat.messages.pop();
         }
@@ -599,7 +607,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const isZipReady = text.trim() === 'READY_FOR_ZIP';
         const showRunButton = text.includes('__SHOW_RUN_BUTTON__');
         
-        // Remove the run button marker from display
         const cleanedText = text.replace('__SHOW_RUN_BUTTON__', '');
         
         return {
@@ -636,35 +643,22 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function addToChat(message, type = 'system') {
-        // Add system messages to chat
+        const currentChat = appState.chats[appState.currentChatId];
         const systemMessage = {
             role: 'system',
             content: message,
             type: type
         };
         
-        // Create a simple system message display
-        const wrapper = document.createElement('div');
-        wrapper.className = 'message-wrapper system';
-        wrapper.innerHTML = `
-            <div class="message system">
-                <div class="avatar">⚙️</div>
-                <div class="message-body">
-                    <div class="message-content" style="background: var(--bg-dark-tertiary); color: var(--text-secondary); font-style: italic;">
-                        ${message}
-                    </div>
-                </div>
-            </div>
-        `;
-        chatMessages.appendChild(wrapper);
-        scrollToBottom();
+        currentChat.messages.push(systemMessage);
+        addMessageToUI(systemMessage);
+        saveStateToLocalStorage();
     }
 
     async function runCode(codeContent) {
         try {
             setStatus('Starting execution environment...', 'typing');
             
-            // Extract code blocks from the content
             const codeBlocks = codeContent.match(/```Code Box\n([\s\S]*?)\n```/g);
             let files = [];
             
@@ -696,7 +690,6 @@ document.addEventListener('DOMContentLoaded', () => {
             
             showTerminal();
             
-            // Join the terminal session
             socket.emit('join_terminal', { session_id: currentTerminalSession });
             
             appendToTerminal(`🚀 Code execution environment started!\n`, 'success');
@@ -704,10 +697,8 @@ document.addEventListener('DOMContentLoaded', () => {
             appendToTerminal(`🌐 Preview URL: ${data.preview_url}\n`, 'success');
             appendToTerminal(`⏰ Session expires in 5 minutes\n\n`, 'stdout');
             
-            // Add preview info to chat
-            addToChat(`🚀 Code execution started! Preview: ${data.preview_url}`);
+            addToChat(`🚀 Code execution started!\n🌐 Preview URL: ${data.preview_url}\n⏰ Session expires in 5 minutes`);
             
-            // Auto-setup files and run
             if (files.length > 0) {
                 setTimeout(() => {
                     files.forEach(file => {
@@ -715,7 +706,6 @@ document.addEventListener('DOMContentLoaded', () => {
                         executeTerminalCommand(command);
                     });
                     
-                    // Auto-run based on file type
                     setTimeout(() => {
                         autoRunCode(files);
                     }, 2000);
@@ -736,14 +726,20 @@ document.addEventListener('DOMContentLoaded', () => {
         
         if (lowercaseContent.includes('<!doctype html') || lowercaseContent.includes('<html')) {
             return 'html';
-        } else if (lowercaseContent.includes('def ') || lowercaseContent.includes('import ')) {
+        } else if (lowercaseContent.includes('def ') || lowercaseContent.includes('import ') || lowercaseContent.includes('print(')) {
             return 'py';
-        } else if (lowercaseContent.includes('function ') || lowercaseContent.includes('const ') || lowercaseContent.includes('let ')) {
+        } else if (lowercaseContent.includes('function ') || lowercaseContent.includes('const ') || lowercaseContent.includes('let ') || lowercaseContent.includes('console.log')) {
             return 'js';
         } else if (lowercaseContent.includes('package ') && lowercaseContent.includes('public class')) {
             return 'java';
         } else if (lowercaseContent.includes('#include') || lowercaseContent.includes('int main')) {
             return 'cpp';
+        } else if (lowercaseContent.includes('flask') || lowercaseContent.includes('app.run')) {
+            return 'py';
+        } else if (lowercaseContent.includes('fastapi') || lowercaseContent.includes('uvicorn')) {
+            return 'py';
+        } else if (lowercaseContent.includes('express') || lowercaseContent.includes('require(')) {
+            return 'js';
         }
         
         return 'txt';
@@ -755,22 +751,61 @@ document.addEventListener('DOMContentLoaded', () => {
         const jsFiles = files.filter(f => f.name.endsWith('.js'));
         
         if (htmlFiles.length > 0) {
-            // For HTML files, try to start a simple HTTP server
-            executeTerminalCommand('python3 -m http.server 8000');
-            addToChat('🌐 Starting web server on port 8000...');
+            addToChat('🌐 Starting web server for HTML files...');
+            executeTerminalCommand('python3 -m http.server 8000 &');
+            
+            setTimeout(() => {
+                addToChat(`✅ Web server running! Visit the preview URL to see your website.`);
+            }, 3000);
+            
         } else if (pythonFiles.length > 0) {
-            // Run Python files
+            addToChat('🐍 Running Python code...');
             pythonFiles.forEach(file => {
                 executeTerminalCommand(`python3 ${file.name}`);
             });
-        } else if (jsFiles.length > 0) {
-            // Run Node.js files
-            executeTerminalCommand('npm install'); // Install dependencies if package.json exists
+            
             setTimeout(() => {
+                const hasFlask = files.some(f => f.content.includes('Flask') || f.content.includes('app.run'));
+                const hasDjango = files.some(f => f.content.includes('django') || f.content.includes('manage.py'));
+                const hasFastAPI = files.some(f => f.content.includes('FastAPI') || f.content.includes('uvicorn'));
+                
+                if (hasFlask) {
+                    addToChat('🌶️ Flask app detected! Installing Flask...');
+                    executeTerminalCommand('pip install flask');
+                    setTimeout(() => executeTerminalCommand(`python3 ${pythonFiles[0].name}`), 2000);
+                } else if (hasDjango) {
+                    addToChat('🎸 Django app detected! Installing Django...');
+                    executeTerminalCommand('pip install django');
+                } else if (hasFastAPI) {
+                    addToChat('⚡ FastAPI app detected! Installing FastAPI...');
+                    executeTerminalCommand('pip install fastapi uvicorn');
+                    setTimeout(() => executeTerminalCommand(`uvicorn ${pythonFiles[0].name.replace('.py', '')}:app --host 0.0.0.0 --port 8000`), 3000);
+                }
+            }, 2000);
+            
+        } else if (jsFiles.length > 0) {
+            addToChat('📦 Running Node.js code...');
+            executeTerminalCommand('npm init -y');
+            
+            const hasExpress = files.some(f => f.content.includes('express') || f.content.includes('require("express")'));
+            if (hasExpress) {
+                addToChat('🚀 Express server detected! Installing Express...');
+                executeTerminalCommand('npm install express');
+                setTimeout(() => executeTerminalCommand(`node ${jsFiles[0].name}`), 3000);
+            } else {
                 jsFiles.forEach(file => {
                     executeTerminalCommand(`node ${file.name}`);
                 });
-            }, 3000);
+            }
+        } else {
+            addToChat('⚡ Executing code...');
+            files.forEach(file => {
+                if (file.name.endsWith('.sh')) {
+                    executeTerminalCommand(`chmod +x ${file.name} && ./${file.name}`);
+                } else {
+                    executeTerminalCommand(`cat ${file.name}`);
+                }
+            });
         }
     }
 
@@ -781,10 +816,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 command: command
             });
             
-            // Show command in terminal
             appendToTerminal(`$ ${command}\n`, 'command');
-            
-            // Also show in chat with arrow
             addToChat(`→ ${command}`);
         }
     }
@@ -797,11 +829,11 @@ document.addEventListener('DOMContentLoaded', () => {
             if (msg.role === 'bot' && msg.content) {
                 const codeBlocks = msg.content.match(/```Code Box\n([\s\S]*?)\n```/g);
                 if (codeBlocks) {
-                    codeBlocks.forEach(block => {
+                    codeBlocks.forEach((block, index) => {
                         const content = block.replace(/```Code Box\n|```/g, '').trim();
                         const lines = content.split('\n');
                         const firstLine = lines[0].trim();
-                        let filename = 'untitled.txt';
+                        let filename = `file${index + 1}.txt`;
                         if (firstLine.startsWith('#') || firstLine.startsWith('//')) {
                             const nameGuess = firstLine.replace(/#|\/|\/\//g, '').trim().split(' ')[0];
                             if (nameGuess.length > 0 && nameGuess.includes('.')) filename = nameGuess;
@@ -972,7 +1004,6 @@ document.addEventListener('DOMContentLoaded', () => {
             displayFilePreviews(data);
             setStatus('Online', 'online');
             
-            // If ZIP was uploaded, show unzipping message
             const hasZip = data.some(file => file.is_zip);
             if (hasZip) {
                 addToChat('📦 ZIP file uploaded and extracted! Contents available for analysis.');
@@ -992,7 +1023,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function displayFilePreviews(files) {
         filePreviewContainer.innerHTML = '';
         files.forEach((file, index) => {
-            if (file.name === "__ZIP_INFO__") return; // Skip zip info entries
+            if (file.name === "__ZIP_INFO__") return;
             
             const preview = document.createElement('div');
             preview.className = 'file-preview';
@@ -1025,7 +1056,6 @@ document.addEventListener('DOMContentLoaded', () => {
         fileInput.addEventListener('change', handleFileSelect);
         newSessionBtn.addEventListener('click', onNewSessionClick);
         
-        // Terminal event listeners
         minimizeTerminal.addEventListener('click', minimizeTerminalWindow);
         closeTerminal.addEventListener('click', hideTerminal);
         
@@ -1097,7 +1127,6 @@ document.addEventListener('DOMContentLoaded', () => {
     function scrollToBottom() { chatMessages.scrollTop = chatMessages.scrollHeight; }
     function autoResizeTextarea() { inputTextArea.style.height = 'auto'; const newHeight = Math.min(inputTextArea.scrollHeight, 150); inputTextArea.style.height = `${newHeight}px`; }
 
-    // Make runCode globally available
     window.runCode = runCode;
 
     init();
