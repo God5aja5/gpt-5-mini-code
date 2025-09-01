@@ -7,17 +7,19 @@ import re
 import zipfile
 import io
 import mimetypes
-import subprocess
+import docker
 import threading
 import time
-import queue
+import tempfile
 import shutil
-import socket
-
 from flask import Flask, request, Response, jsonify, send_from_directory, stream_with_context, send_file
-from werkzeug.serving import is_running_from_reloader
+from flask_socketio import SocketIO, emit, join_room, leave_room
+import subprocess
+import signal
 
 app = Flask(__name__, static_url_path="", static_folder=".")
+app.config['SECRET_KEY'] = 'your-secret-key'
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 # ====== Workik API Setup (GPT-5 mini only) ======
 API_URL = "https://wfhbqniijcsamdp2v3i6nts4ke0ebkyj.lambda-url.us-east-1.on.aws/api_ai_playground/ai/playground/ai/trigger"
@@ -25,12 +27,9 @@ WORKIK_TOKEN = os.getenv("WORKIK_TOKEN", "undefined")
 
 # Default tokens (will be overridden by tokens.txt if present)
 DEFAULT_WK_LD = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoibG9jYWwiLCJzZXNzaW9uX2lkIjoiMTc1NjM4ODE4MyIsInJlcXVlc3RfY291bnQiOjAsImV4cCI6MTc1Njk5Mjk4M30.JbAEBmTbWtyysFGDftxRJvqy1LvJfIR1W-HVv_Ss-7U"
-DEFAULT_WK_CK = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoiY29va2llIiwic2Vzc2lvbl9pZCI6IjE3NTYzODgxODMiLCJyZXF1ZXN0X2NvdW50OjAsImV4cCI6MTc1Njk5Mjk4M30.Fua9aRmHJLPte8cF807w4jHA6Ff1GPwGAaOWcY9P7Us"
+DEFAULT_WK_CK = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0eXBlIjoiY29va2llIiwic2Vzc2lvbl9pZCI6IjE3NTYzODgxODMiLCJyZXF1ZXN0X2NvdW50IjowLCJleHAiOjE3NTY5OTI5ODN9.Fua9aRmHJLPte8cF807w4jHA6Ff1GPwGAaOWcY9P7Us"
 
 TOKENS_FILE = "tokens.txt"
-PROJECTS_DIR = os.path.join(os.getcwd(), "temp_projects")
-if not os.path.exists(PROJECTS_DIR):
-    os.makedirs(PROJECTS_DIR)
 
 _current_tokens = {
     "wk_ld": DEFAULT_WK_LD,
@@ -50,9 +49,112 @@ headers = {
     "referer": "https://workik.com/"
 }
 
-# In-memory session data for terminals
-terminal_sessions = {}
-session_lock = threading.Lock()
+# ====== Docker & Terminal Management ======
+try:
+    docker_client = docker.from_env()
+except:
+    docker_client = None
+
+active_containers = {}
+active_terminals = {}
+preview_urls = {}
+
+class TerminalManager:
+    def __init__(self, container_id):
+        self.container_id = container_id
+        self.container = docker_client.containers.get(container_id)
+        self.exec_id = None
+        self.process = None
+        
+    def execute_command(self, command, room_id):
+        try:
+            exec_result = self.container.exec_run(
+                command, 
+                tty=True, 
+                stdin=True, 
+                stdout=True, 
+                stderr=True,
+                stream=True,
+                socket=True
+            )
+            
+            for chunk in exec_result.output:
+                if chunk:
+                    output = chunk.decode('utf-8', errors='ignore')
+                    socketio.emit('terminal_output', {
+                        'output': output,
+                        'type': 'stdout'
+                    }, room=room_id)
+                    
+        except Exception as e:
+            socketio.emit('terminal_output', {
+                'output': f"Error executing command: {str(e)}\n",
+                'type': 'stderr'
+            }, room=room_id)
+
+def create_code_container(session_id):
+    """Create a new Docker container for code execution"""
+    if not docker_client:
+        return None
+        
+    try:
+        # Create container with Ubuntu and common development tools
+        container = docker_client.containers.run(
+            "ubuntu:22.04",
+            command="bash",
+            detach=True,
+            tty=True,
+            stdin_open=True,
+            working_dir="/workspace",
+            volumes={tempfile.gettempdir(): {'bind': '/tmp', 'mode': 'rw'}},
+            name=f"code_executor_{session_id}",
+            remove=True,
+            mem_limit="512m",
+            cpu_period=100000,
+            cpu_quota=50000
+        )
+        
+        # Install basic tools
+        setup_commands = [
+            "apt-get update",
+            "apt-get install -y python3 python3-pip nodejs npm curl wget unzip git",
+            "apt-get install -y build-essential",
+            "mkdir -p /workspace",
+            "cd /workspace"
+        ]
+        
+        for cmd in setup_commands:
+            container.exec_run(cmd, detach=False)
+            
+        active_containers[session_id] = container.id
+        active_terminals[session_id] = TerminalManager(container.id)
+        
+        # Set expiry timer (5 minutes)
+        timer = threading.Timer(300, cleanup_container, args=[session_id])
+        timer.start()
+        
+        return container.id
+        
+    except Exception as e:
+        print(f"Error creating container: {e}")
+        return None
+
+def cleanup_container(session_id):
+    """Clean up container and related resources"""
+    try:
+        if session_id in active_containers:
+            container = docker_client.containers.get(active_containers[session_id])
+            container.stop(timeout=5)
+            del active_containers[session_id]
+            
+        if session_id in active_terminals:
+            del active_terminals[session_id]
+            
+        if session_id in preview_urls:
+            del preview_urls[session_id]
+            
+    except Exception as e:
+        print(f"Error cleaning up container: {e}")
 
 def load_tokens_from_file():
     global _current_tokens
@@ -93,7 +195,7 @@ def extract_last_code_block(messages):
         if msg.get("role") == "bot" and msg.get("content"):
             code_blocks = re.findall(r'```Code Box\n([\s\S]*?)\n```', msg["content"])
             if code_blocks:
-                return code_blocks[-1]  # Return the last code block
+                return code_blocks[-1]
     return None
 
 def is_code_edit_request(text, has_previous_code=False):
@@ -130,24 +232,38 @@ def is_code_edit_request(text, has_previous_code=False):
     
     return False
 
+def should_show_run_button(content):
+    """Check if the response contains code that can be executed"""
+    if not content:
+        return False
+        
+    # Check for code blocks
+    has_code_block = '```Code Box' in content or '```html' in content or '```python' in content or '```javascript' in content
+    
+    # Check for web-related keywords
+    web_keywords = ['html', 'css', 'javascript', 'website', 'web page', 'frontend', 'backend', 'server', 'app']
+    has_web_content = any(keyword in content.lower() for keyword in web_keywords)
+    
+    return has_code_block and (has_web_content or 'python' in content.lower() or 'node' in content.lower())
+
 def ai_payload(prompt, messages=None, file_info=None, is_edit_request=False, is_continue=False, last_code=None):
-    # Enhanced system instructions
+    # Enhanced system instructions with terminal capabilities
     system_instructions = (
-        "You are Gpt 5 mini. Rules:\n"
+        "You are Gpt 5 mini with terminal access. Rules:\n"
         "1) Always place any code inside triple backticks with 'Code Box' as the language identifier, like:\n"
         "```Code Box\n...your code...\n```\n"
         "2) When a user asks to edit code, take the provided existing code and modify it according to their request. "
         "Return only the complete updated code under a 'Code Box' with minimal explanation.\n"
         "3) When editing code, maintain the existing structure and add/modify only what's requested.\n"
-        "4) When a user uploads files, analyze them by their file name and content, and use them to inform your response. "
-        "Also, create a detailed `PROJECT_FILE_STRUCTURE` in markdown to show the file tree after unzipping.\n"
+        "4) When a user uploads files, analyze them by their file name and content, and use them to inform your response.\n"
         "5) When the user asks for a project in a ZIP file, only respond with 'READY_FOR_ZIP' and nothing else.\n"
         "6) You have a memory of the current conversation. Use the provided message history to understand context.\n"
         "7) If this is a continue request, continue from where you left off without repeating content.\n"
         "8) Focus on clean, efficient, and well-commented code.\n"
-        "9) When asked to run code, provide a run command inside a `<RUN_CMD>` tag like `<RUN_CMD>python main.py</RUN_CMD>`. If you see a user request that implies running or executing code, you MUST respond with the run command. You can include multiple commands. For websites, you must also provide a `<PREVIEW_URL>`. After providing the run command, you will start a terminal session. You will provide real-time updates from the terminal, prefixed with `-> SHELL OUTPUT:`. If there is an error, you must debug and provide a fix. After the fix, you should provide the corrected run command again.\n"
-        "10) ALWAYS provide complete, working code solutions. If you need to install packages, provide the `pip install` or `npm install` command first inside `<RUN_CMD>`.\n"
-        "11) Always provide code in a single, complete block unless you are being asked to provide multiple files. In that case, use clear filename comments like `// file: filename.js` at the top of each block.\n"
+        "9) Always provide complete, working code solutions.\n"
+        "10) When providing code that can be executed (web apps, Python scripts, etc.), mention that it can be run using the Run Code button.\n"
+        "11) If you need to install packages or debug errors, provide the exact terminal commands needed.\n"
+        "12) For web applications, always include proper HTML structure with CSS and JavaScript if needed."
     )
 
     # If it's an edit request and we have previous code, include it in the context
@@ -175,12 +291,7 @@ def ai_payload(prompt, messages=None, file_info=None, is_edit_request=False, is_
         for msg in messages:
             # The API might expect 'assistant' instead of 'bot'
             role = "assistant" if msg.get("role") == "bot" else msg.get("role")
-            content = msg.get("content")
-            if msg.get("role") == "user" and msg.get("files"):
-                # Append file info to user message content for context
-                file_names = ", ".join([f['name'] for f in msg['files']])
-                content += f"\n\n[Uploaded files: {file_names}]"
-            api_messages.append({"role": role, "content": content})
+            api_messages.append({"role": role, "content": msg.get("content")})
 
     payload = {
         "aiInput": prompt,
@@ -239,6 +350,38 @@ def workik_stream(prompt, messages=None, files=None, is_edit=False, is_continue=
             # Ignore lines that are not valid JSON or don't have the expected structure
             continue
 
+# ====== Socket.IO Events ======
+@socketio.on('connect')
+def handle_connect():
+    print('Client connected')
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print('Client disconnected')
+
+@socketio.on('join_terminal')
+def handle_join_terminal(data):
+    session_id = data.get('session_id')
+    join_room(session_id)
+    emit('terminal_status', {'status': 'connected', 'session_id': session_id})
+
+@socketio.on('terminal_command')
+def handle_terminal_command(data):
+    session_id = data.get('session_id')
+    command = data.get('command')
+    
+    if session_id in active_terminals:
+        terminal = active_terminals[session_id]
+        # Execute command in background thread
+        thread = threading.Thread(target=terminal.execute_command, args=(command, session_id))
+        thread.start()
+    else:
+        emit('terminal_output', {
+            'output': 'Error: Terminal session not found\n',
+            'type': 'stderr'
+        }, room=session_id)
+
+# ====== HTTP Routes ======
 @app.route("/")
 def index():
     return send_from_directory(".", "index.html")
@@ -271,6 +414,13 @@ def upload_files():
                                     "mime": mime_type or 'text/plain'
                                 })
                         results.extend(extracted_files)
+                        # Add zip info for terminal processing
+                        results.append({
+                            "name": "__ZIP_INFO__",
+                            "content": f"Extracted {len(extracted_files)} files from {f.filename}",
+                            "mime": "text/plain",
+                            "is_zip": True
+                        })
                 except zipfile.BadZipFile:
                     return jsonify({"error": "Invalid or corrupted ZIP file"}), 400
                 except UnicodeDecodeError:
@@ -293,7 +443,6 @@ def upload_files():
         
         return jsonify(results), 200
     except Exception as e:
-        # A catch-all for any unexpected errors during file processing
         return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
 
 @app.route("/chat", methods=["POST"])
@@ -309,8 +458,14 @@ def chat():
     is_edit = is_code_edit_request(text, has_previous_code=bool(last_code))
 
     def generate():
+        bot_response = ""
         for piece in workik_stream(text, messages=messages, files=file_info_list, is_edit=is_edit, is_continue=is_continue, last_code=last_code):
+            bot_response += piece
             yield piece
+        
+        # Check if response should have run button
+        if should_show_run_button(bot_response):
+            yield "\n\n__SHOW_RUN_BUTTON__"
 
     return Response(stream_with_context(generate()), mimetype="text/plain; charset=utf-8")
 
@@ -340,8 +495,14 @@ def regenerate():
     is_edit = is_code_edit_request(text, has_previous_code=bool(last_code))
 
     def generate():
+        bot_response = ""
         for piece in workik_stream(text, messages=regenerate_messages, files=file_info_list, is_edit=is_edit, last_code=last_code):
+            bot_response += piece
             yield piece
+        
+        # Check if response should have run button
+        if should_show_run_button(bot_response):
+            yield "\n\n__SHOW_RUN_BUTTON__"
 
     return Response(stream_with_context(generate()), mimetype="text/plain; charset=utf-8")
 
@@ -364,7 +525,85 @@ def create_zip():
     zip_buffer.seek(0)
     return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='gpt_project.zip')
 
-# ====== Token refresh helpers (from your extraction code) ======
+@app.route("/run_code", methods=["POST"])
+def run_code():
+    """Create a new code execution environment"""
+    data = request.get_json(force=True, silent=True) or {}
+    code = data.get("code", "")
+    session_id = data.get("session_id") or str(uuid.uuid4())
+    file_list = data.get("files", [])
+    
+    if not docker_client:
+        return jsonify({"error": "Docker not available"}), 500
+    
+    try:
+        # Create container
+        container_id = create_code_container(session_id)
+        if not container_id:
+            return jsonify({"error": "Failed to create execution environment"}), 500
+        
+        # Generate preview URL (this would be your domain + session_id)
+        preview_url = f"https://{request.host}/preview/{session_id}"
+        preview_urls[session_id] = {
+            "url": preview_url,
+            "created_at": time.time(),
+            "expires_at": time.time() + 300  # 5 minutes
+        }
+        
+        return jsonify({
+            "success": True,
+            "session_id": session_id,
+            "container_id": container_id,
+            "preview_url": preview_url,
+            "expires_in": 300
+        })
+        
+    except Exception as e:
+        return jsonify({"error": f"Failed to create execution environment: {str(e)}"}), 500
+
+@app.route("/preview/<session_id>")
+def preview_code(session_id):
+    """Serve the code preview"""
+    if session_id not in preview_urls:
+        return "Preview session not found or expired", 404
+    
+    preview_info = preview_urls[session_id]
+    if time.time() > preview_info["expires_at"]:
+        cleanup_container(session_id)
+        return "Preview session expired", 410
+    
+    # Serve index.html from the container if it exists
+    try:
+        if session_id in active_containers:
+            container = docker_client.containers.get(active_containers[session_id])
+            # Try to get index.html content
+            try:
+                exec_result = container.exec_run("cat /workspace/index.html")
+                if exec_result.exit_code == 0:
+                    return exec_result.output.decode('utf-8')
+            except:
+                pass
+                
+            # Fallback to simple HTML
+            return """
+            <html>
+            <head><title>Code Preview</title></head>
+            <body>
+                <h1>Code Preview</h1>
+                <p>Your code is running in the terminal. Check the chat for output.</p>
+                <script>
+                    // Auto-refresh every 2 seconds
+                    setTimeout(() => location.reload(), 2000);
+                </script>
+            </body>
+            </html>
+            """
+    except:
+        pass
+    
+    return "Error loading preview", 500
+
+# ====== Token refresh helpers ======
 def extract_tokens_from_response(text):
     try:
         main_data = json.loads(text)
@@ -432,155 +671,6 @@ def apply_tokens():
     append_tokens_to_file(wk_ld, wk_ck, coding_language=coding_language)
     return jsonify({"ok": True}), 200
 
-# ====== New Terminal and Preview Feature ======
-def find_free_port(start_port=5001, end_port=6000):
-    for port in range(start_port, end_port):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("0.0.0.0", port))
-                return port
-            except socket.error:
-                continue
-    return None
-
-def start_shell_session(session_id, project_path):
-    with session_lock:
-        if session_id in terminal_sessions:
-            return terminal_sessions[session_id]
-
-        output_queue = queue.Queue()
-        preview_port = find_free_port()
-        if not preview_port:
-            output_queue.put("Error: Could not find a free port to serve the application.")
-            return None, None
-
-        def monitor_process(process, q, timeout=300):
-            try:
-                end_time = time.time() + timeout
-                while time.time() < end_time and process.poll() is None:
-                    line = process.stdout.readline()
-                    if line:
-                        q.put(line.decode('utf-8'))
-                    time.sleep(0.1)
-                if process.poll() is None:
-                    process.terminate()
-                    q.put("\nSession timeout (5 minutes). Terminating process.")
-            except Exception as e:
-                q.put(f"\nAn error occurred in the terminal process: {e}")
-            finally:
-                q.put(None)  # Signal that the process is done
-
-        process = subprocess.Popen(
-            ['/bin/bash'],
-            cwd=project_path,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=False,  # Use binary mode to avoid text encoding issues with pipes
-            bufsize=1
-        )
-        
-        thread = threading.Thread(target=monitor_process, args=(process, output_queue, 300))
-        thread.daemon = True
-        thread.start()
-
-        terminal_sessions[session_id] = {
-            "process": process,
-            "output_queue": output_queue,
-            "thread": thread,
-            "project_path": project_path,
-            "created_at": time.time(),
-            "preview_url": f"http://localhost:{preview_port}"
-        }
-        
-        return process, preview_port
-
-@app.route("/start_terminal", methods=["POST"])
-def start_terminal():
-    data = request.get_json(force=True, silent=True) or {}
-    files = data.get("files", [])
-    
-    if not files:
-        return jsonify({"error": "No files provided to create a project."}), 400
-
-    session_id = str(uuid.uuid4())
-    project_path = os.path.join(PROJECTS_DIR, session_id)
-    os.makedirs(project_path)
-
-    for file_data in files:
-        file_path = os.path.join(project_path, file_data["name"])
-        try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(file_data["content"])
-        except Exception as e:
-            return jsonify({"error": f"Failed to write file {file_data['name']}: {str(e)}"}), 500
-
-    start_shell_session(session_id, project_path)
-    return jsonify({"session_id": session_id})
-
-def run_command(session_id, command):
-    with session_lock:
-        session = terminal_sessions.get(session_id)
-        if not session or session['process'].poll() is not None:
-            return {"error": "Terminal session not active."}
-        
-        try:
-            session['process'].stdin.write(command.encode('utf-8') + b'\n')
-            session['process'].stdin.flush()
-            return {"success": True}
-        except Exception as e:
-            return {"error": str(e)}
-
-@app.route("/terminal/<session_id>/output", methods=["GET"])
-def stream_terminal_output(session_id):
-    def generate():
-        with session_lock:
-            session = terminal_sessions.get(session_id)
-            if not session:
-                yield "Error: No active terminal session found.\n"
-                return
-        
-        q = session['output_queue']
-        while session['thread'].is_alive() or not q.empty():
-            try:
-                line = q.get(timeout=1)
-                if line is None:
-                    break
-                yield line
-            except queue.Empty:
-                continue
-
-    return Response(stream_with_context(generate()), mimetype="text/plain")
-
-@app.route("/terminal/<session_id>/command", methods=["POST"])
-def send_terminal_command(session_id):
-    data = request.get_json(force=True, silent=True) or {}
-    command = data.get("command")
-    if not command:
-        return jsonify({"error": "Command not provided."}), 400
-    
-    result = run_command(session_id, command)
-    return jsonify(result)
-
-def cleanup_old_sessions():
-    with session_lock:
-        now = time.time()
-        to_delete = [sid for sid, session in terminal_sessions.items() if now - session["created_at"] > 300 or session["process"].poll() is not None]
-        for sid in to_delete:
-            print(f"Cleaning up session: {sid}")
-            session = terminal_sessions[sid]
-            if session["process"].poll() is None:
-                session["process"].terminate()
-            if os.path.exists(session["project_path"]):
-                shutil.rmtree(session["project_path"])
-            del terminal_sessions[sid]
-
-@app.before_request
-def before_request_hook():
-    if not is_running_from_reloader():
-        # Only run cleanup in the main process, not the reloader
-        cleanup_old_sessions()
-        
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    socketio.run(app, host="0.0.0.0", port=port, debug=False)
